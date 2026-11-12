@@ -78,7 +78,7 @@ jobs:
           find "$PREFIX/lib/wine" \( -name '*.dll' -o -name '*.exe' -o -name '*.sys' -o -name '*.drv' \) -print0 | \
             xargs -0 -n 50 x86_64-w64-mingw32-strip --strip-debug 2>/dev/null || true
           cd "$GITHUB_WORKSPACE"
-          name="wine-cx-${CX_VERSION}$([ "${{ inputs.apply_patches == true }}" = true ] && echo -patched)"
+          name="wine-cx-${CX_VERSION}${{ inputs.apply_patches == true && '-patched' || '' }}"
           tar -cJf "$name.tar.xz" -C "$PREFIX" .
           shasum -a 256 "$name.tar.xz" > "$name.tar.xz.sha256"
           echo "PKG=$name" >> "$GITHUB_ENV"
