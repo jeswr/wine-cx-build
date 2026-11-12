@@ -1,0 +1,100 @@
+name: Build CrossOver Wine (macOS)
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/**', 'patches/**']
+  workflow_dispatch:
+    inputs:
+      cx_version:
+        description: CrossOver source version
+        default: "26.3.0"
+      apply_patches:
+        description: Apply the patches in patches/
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Intel runner: Wine for macOS is an x86_64 build that runs under Rosetta on Apple silicon
+    runs-on: macos-15-intel
+    timeout-minutes: 300
+    env:
+      CX_VERSION: ${{ inputs.cx_version || '26.3.0' }}
+      PREFIX: ${{ github.workspace }}/install
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install bison flex pkgconf mingw-w64 freetype gnutls molten-vk sdl2 gettext
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Download CrossOver sources
+        run: |
+          curl -fL --retry 3 -o cx.tar.gz \
+            "https://media.codeweavers.com/pub/crossover/source/crossover-sources-${CX_VERSION}.tar.gz"
+          shasum -a 256 cx.tar.gz | tee cx.tar.gz.sha256
+          tar xf cx.tar.gz
+          ls sources
+
+      - name: Apply patches
+        if: ${{ inputs.apply_patches == true }}
+        working-directory: sources/wine
+        run: |
+          for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            echo "Applying $(basename "$p")"
+            patch -p1 --forward < "$p"
+          done
+          # patches that change server/protocol.def need the generated files refreshed
+          if [ -x tools/make_requests ]; then tools/make_requests; fi
+
+      - name: Configure
+        run: |
+          mkdir build && cd build
+          ../sources/wine/configure \
+            --prefix="$PREFIX" \
+            --enable-archs=i386,x86_64 \
+            --disable-tests \
+            --without-alsa --without-capi --without-dbus --without-oss \
+            --without-pulse --without-udev --without-v4l2 --without-x \
+            --without-wayland --without-gstreamer \
+            --with-gnutls --with-freetype --with-sdl
+          tail -n 40 config.log | grep -i 'warn' || true
+
+      - name: Build
+        working-directory: build
+        run: make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Install and package
+        working-directory: build
+        run: |
+          make install-lib
+          # strip debug info from the Windows-side DLLs, as shipped builds do
+          find "$PREFIX/lib/wine" \( -name '*.dll' -o -name '*.exe' -o -name '*.sys' -o -name '*.drv' \) -print0 | \
+            xargs -0 -n 50 x86_64-w64-mingw32-strip --strip-debug 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE"
+          name="wine-cx-${CX_VERSION}$([ "${{ inputs.apply_patches == true }}" = true ] && echo -patched)"
+          tar -cJf "$name.tar.xz" -C "$PREFIX" .
+          shasum -a 256 "$name.tar.xz" > "$name.tar.xz.sha256"
+          echo "PKG=$name" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${PKG}-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" "$PKG.tar.xz" "$PKG.tar.xz.sha256" cx.tar.gz.sha256 \
+            --title "$tag" \
+            --notes "Wine from CodeWeavers' published CrossOver ${CX_VERSION} open-source sources (LGPL), built on GitHub's macOS runner. Contains no CrossOver application code and no D3DMetal."
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-log
+          path: build/config.log
