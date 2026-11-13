@@ -75,16 +75,6 @@ jobs:
           tail -n 20 launcher.err || true
           grep -q 'launcher-ok' launcher.out
 
-      - name: Crash-loop guards
-        run: |
-          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
-          brew install mingw-w64
-          printf 'int main(void){ *(volatile int *)0 = 0; return 0; }\n' > crash.c
-          x86_64-w64-mingw32-gcc -O0 -o crash.exe crash.c
-          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
-          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
-          /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
-          bash scripts/test-guards.sh "$PWD/crash.exe"
       # "Wine runs but shows nothing" was the fault on the Mac, so check that
       # a window really reaches the screen, and keep a picture of it.
       - name: Open a Wine window and look for it on screen
@@ -119,6 +109,16 @@ jobs:
           if [ "$found" != 1 ]; then echo "No Wine window appeared on screen."; exit 1; fi
           if /bin/bash "$L" doctor | grep -q 'Processes:    0 from Wine'; then :; else echo "stop left Wine processes behind"; exit 1; fi
 
+      - name: Crash-loop guards
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          brew install mingw-w64
+          printf 'int main(void){ *(volatile int *)0 = 0; return 0; }\n' > crash.c
+          x86_64-w64-mingw32-gcc -O0 -o crash.exe crash.c
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
+          bash scripts/test-guards.sh "$PWD/crash.exe"
       - name: Upload the logs
         if: always()
         uses: actions/upload-artifact@v4

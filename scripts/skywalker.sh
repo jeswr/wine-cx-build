@@ -562,7 +562,8 @@ cmd_steam() {
   prepare_prefix
   wine_env
   cd "$HOME" || true
-  local log="$LOGS/steam-$(date +%Y%m%d-%H%M%S).log"
+  local log
+  log="$LOGS/steam-$(date +%Y%m%d-%H%M%S).log"
   start_watchdog "$log"
   run_wine "$STEAM_EXE" >> "$log" 2>&1 &
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
