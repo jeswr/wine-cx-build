@@ -6,6 +6,7 @@
 # Usage: steamtest.sh <minutes to watch> [options for Steam...]
 # Needs: "skywalker.sh install" done, SKYWALKER_HOME and SKY_PREFIX set.
 # Optional: GRAPHICS=split|dxmt|wine (default wine), TRACE=<WINEDEBUG value> (default fixme-all),
+#           FIRST_TRACE=<WINEDEBUG value for the first start, which downloads Steam's update>,
 #           STEAMTEST_OUT=<folder for logs and screenshots> (default ./steam-logs)
 # Written for the stock /bin/bash 3.2 on macOS.
 set -uo pipefail
@@ -16,6 +17,7 @@ L="$SKYWALKER_HOME/skywalker.sh"
 OUT="${STEAMTEST_OUT:-$PWD/steam-logs}"
 GRAPHICS="${GRAPHICS:-wine}"
 TRACE="${TRACE:-fixme-all}"
+FIRST_TRACE="${FIRST_TRACE:-fixme-all}"
 STEAM_DIR="$SKY_PREFIX/drive_c/Program Files (x86)/Steam"
 mkdir -p "$OUT"
 
@@ -64,11 +66,36 @@ fi
 
 helpers() { /bin/ps -axww -o command= | grep -c -i '[s]teamwebhelper.exe' || true; }
 
+# A thread of Steam sometimes dies inside Wine's fault handler ("nested
+# exception on signal stack") while it holds a lock, and Steam then hangs.
+# When the newest log shows that, record which code lives at the address and
+# what the remaining threads are doing. $1 = name for the files.
+hang_report() {
+  local tag="$1" log addr pid n=0 f
+  log="$(ls -t "$SKYWALKER_HOME"/logs/steam-*.log 2>/dev/null | head -n 1)"
+  [ -n "$log" ] || return 0
+  addr="$(grep -a -o 'nested exception on signal stack addr 0x[0-9a-f]*' "$log" | head -n 1 | sed 's/.* //')"
+  [ -n "$addr" ] || return 0
+  note "a thread died in Wine's fault handler at $addr; recording where that is"
+  for pid in $(/bin/ps -axww -o pid=,command= | grep -i '[\\]steam\.exe' | awk '{ print $1 }' | head -n 3); do
+    n=$((n + 1))
+    f="$OUT/hang-$tag-$n"
+    /bin/ps -o pid=,etime=,command= -p "$pid" | cut -c1-200 > "$f.txt"
+    # shellcheck disable=SC2016
+    with_deadline 60 /bin/sh -c 'sudo -n atos -p "$1" "$2" > "$3" 2>&1' sh "$pid" "$addr" "$f.atos.txt" || true
+    # shellcheck disable=SC2016
+    with_deadline 90 /bin/sh -c 'sudo -n vmmap "$1" > "$2" 2>&1' sh "$pid" "$f.vmmap.txt" || true
+    # shellcheck disable=SC2016
+    with_deadline 90 /bin/sh -c 'sudo -n sample "$1" 2 -file "$2" > /dev/null 2>&1' sh "$pid" "$f.sample.txt" || true
+    note "pid $pid: $(head -n 2 "$f.atos.txt" 2>/dev/null | tr '\n' ' ' | cut -c1-240)"
+  done
+}
+
 # The installer leaves only a small starter, which downloads the real Steam on
 # its first run and then restarts itself. That restart sometimes hangs, so the
 # first run is only for the download, with a deadline, and is then shut down.
 note "first start: letting Steam download its update"
-WINEDEBUG=fixme-all /bin/bash "$L" steam > /dev/null 2>&1
+WINEDEBUG="$FIRST_TRACE" /bin/bash "$L" steam > /dev/null 2>&1
 t=0
 while [ "$t" -lt 420 ]; do
   sleep 5; t=$((t + 5))
@@ -76,6 +103,7 @@ while [ "$t" -lt 420 ]; do
   if grep -q 'Update complete' "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null; then sleep 15; break; fi
 done
 note "update phase over after ${t}s: $(tail -n 1 "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null | cut -c1-120)"
+hang_report first
 /bin/bash "$L" stop > /dev/null 2>&1 || true
 mkdir -p "$OUT/first-start"
 mv "$SKYWALKER_HOME"/logs/steam-*.log "$OUT/first-start/" 2>/dev/null || true
@@ -115,6 +143,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
 done
 rm -f "$OUT/windows-now.txt"
 
+hang_report watch
 note "last window list:"
 tail -n 12 "$OUT/windows.log"
 /bin/bash "$L" doctor | grep -E 'Processes|Wine running'

@@ -22,32 +22,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: arm-patched
+          - name: arm-seh-1
             runner: macos-15
-            graphics: wine
-            args: ""
-            trace: fixme-all
-          - name: arm-patched-trace
+            first_trace: "fixme-all,fixme+virtual,warn+virtual,+seh"
+          - name: arm-seh-2
             runner: macos-15
-            graphics: wine
-            args: ""
-            trace: "fixme-all,+win,+macdrv"
-          - name: arm-patched-split
+            first_trace: "fixme-all,fixme+virtual,warn+virtual,+seh"
+          - name: arm-plain
             runner: macos-15
-            graphics: split
-            args: ""
-            trace: fixme-all
-          - name: intel-patched
+            first_trace: fixme-all
+          - name: intel-seh
             runner: macos-15-intel
-            graphics: wine
-            args: ""
-            trace: fixme-all
+            first_trace: "fixme-all,fixme+virtual,warn+virtual,+seh"
+          - name: intel-plain
+            runner: macos-15-intel
+            first_trace: fixme-all
     env:
       TAG: wine-cx-26.3.0-patched-6
-      GRAPHICS: ${{ matrix.graphics }}
-      STEAM_OPTIONS: ${{ matrix.args }}
-      TRACE: ${{ matrix.trace }}
-      MINUTES: "5"
+      GRAPHICS: wine
+      STEAM_OPTIONS: ""
+      TRACE: fixme-all
+      FIRST_TRACE: ${{ matrix.first_trace }}
+      MINUTES: "3"
     steps:
       - uses: actions/checkout@v4
 
