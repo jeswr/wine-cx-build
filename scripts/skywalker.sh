@@ -20,6 +20,12 @@
 #                                keep: remember the game's screen and window settings as they
 #                                are now and put them back before each start if something
 #                                changed them (an external monitor does); off: stop doing that
+#   skywalker.sh prewarm [min]   start Steam now, without a window and without the game, so that
+#                                the next "run" skips Steam's slow start; it closes again after
+#                                PREWARM_MINUTES (or the minutes given) if the game is not played
+#   skywalker.sh autostart on|off
+#                                on: do that prewarm by itself every time you log in to the Mac
+#   skywalker.sh cpu [seconds]   measure how much processor time Wine's programs use (troubleshooting)
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
@@ -93,6 +99,10 @@ HUD=0                    # 1 = show Apple's frame counter
 # start skips Steam's own slow start. 0 = close Steam with the game.
 KEEP_STEAM_MINUTES=30
 
+# "prewarm" (and "autostart on", which runs it at login) keeps Steam open this
+# many minutes while waiting for the first game. 0 = until "stop" or log-out.
+PREWARM_MINUTES=120
+
 # Safety net: Wine may start at most this many processes on top of what is
 # already running. Steam and the game need well under 100.
 PROC_HEADROOM=400
@@ -114,10 +124,10 @@ load_conf() {
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
-  : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}"
+  : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS; do
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -1018,6 +1028,150 @@ cmd_steam() {
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
 }
 
+# Starts Steam alone, so that it is already up when the game is wanted. What
+# "run" then does is the same as after a game within KEEP_STEAM_MINUTES.
+cmd_prewarm() {
+  load_conf
+  local mins="${1:-$PREWARM_MINUTES}" secs log
+  case "$mins" in '' | *[!0-9.]*) die "Use: skywalker.sh prewarm [minutes]" ;; esac
+  need_wine
+  other_wine_running && die "CrossOver or another Wine is running. Quit it first."
+  if game_running; then
+    say "The game is running, so there is nothing to prepare."
+    return 0
+  fi
+  [ -f "$(steam_dir)/steam.exe" ] || die "Steam is not in the bottle yet ($PREFIX)."
+  mkdir -p "$LOGS"
+  wine_env
+  secs="$(/usr/bin/awk -v m="$mins" 'BEGIN { printf "%d", m * 60 }')"
+  if our_wineserver_running && steam_running; then
+    if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
+      if [ "$secs" -gt 0 ]; then start_idle_timer "$secs"; else rm -f "$IDLE"; fi
+      say "Steam is already open, so the next start of the game is quick."
+      return 0
+    fi
+    say "Steam is open with other settings, so it is restarted."
+    shutdown_wine
+  fi
+  prepare_prefix
+  cd "$HOME" || true
+  log="$LOGS/prewarm.log"
+  : > "$log"
+  session_sig > "$SESSION"
+  start_watchdog "$log"
+  # shellcheck disable=SC2086,SC2046
+  run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) >> "$log" 2>&1 &
+  if [ "$secs" -gt 0 ]; then
+    start_idle_timer "$secs"
+    say "Steam is starting in the background. It closes again in $mins minutes if the game is not played. To close it now: bash $HOME_DIR/skywalker.sh stop"
+  else
+    rm -f "$IDLE"
+    say "Steam is starting in the background and stays open. To close it: bash $HOME_DIR/skywalker.sh stop"
+  fi
+}
+
+# "autostart on" asks macOS to run "prewarm" at every log-in (a launch agent
+# in the user's own Library; nothing system-wide and no administrator rights).
+AGENT_LABEL="io.github.jeswr.skywalker.prewarm"
+AGENT="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+LAUNCHCTL="${SKY_LAUNCHCTL:-/bin/launchctl}"
+xml_text() { printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+
+cmd_autostart() {
+  load_conf
+  local dom
+  dom="gui/$(id -u)"
+  case "${1:-status}" in
+    on)
+      [ -x "$LAUNCHCTL" ] || die "This needs macOS."
+      [ -f "$HOME_DIR/skywalker.sh" ] || die "Run 'install' first: the launcher is not in $HOME_DIR."
+      mkdir -p "$(dirname "$AGENT")" "$LOGS"
+      # Interactive: no background throttling for Steam, or for the game it starts.
+      # AbandonProcessGroup: Steam stays when the launcher script itself has ended.
+      cat > "$AGENT" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$AGENT_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$(xml_text "$HOME_DIR/skywalker.sh")</string>
+    <string>prewarm</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SKYWALKER_HOME</key><string>$(xml_text "$HOME_DIR")</string>
+    <key>SKYWALKER_APP</key><string>$(xml_text "$APP")</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>$(xml_text "$LOGS/autostart.log")</string>
+  <key>StandardErrorPath</key><string>$(xml_text "$LOGS/autostart.log")</string>
+</dict>
+</plist>
+EOF
+      "$LAUNCHCTL" bootout "$dom/$AGENT_LABEL" >/dev/null 2>&1 || true
+      "$LAUNCHCTL" bootstrap "$dom" "$AGENT" || { rm -f "$AGENT"; die "macOS did not accept the log-in item."; }
+      say "Steam is now started in the background at every log-in (and right now), for $PREWARM_MINUTES minutes each time."
+      say "To undo: bash $HOME_DIR/skywalker.sh autostart off"
+      ;;
+    off)
+      if [ -x "$LAUNCHCTL" ]; then "$LAUNCHCTL" bootout "$dom/$AGENT_LABEL" >/dev/null 2>&1 || true; fi
+      rm -f "$AGENT"
+      say "Steam is no longer started at log-in. (A Steam that is open now stays until 'stop' or its timer.)"
+      ;;
+    status)
+      if [ -f "$AGENT" ]; then echo "Autostart: on ($AGENT)"; else echo "Autostart: off"; fi
+      ;;
+    *) die "Use: skywalker.sh autostart on|off" ;;
+  esac
+}
+
+# One line per Wine program: process id, processor seconds used so far, name.
+cpu_snapshot() {
+  /bin/ps -x -o pid=,time=,command= | /usr/bin/awk -v w="$WINES/" '{
+    pid = $1; t = $2; rest = $0; sub(/^ *[0-9]+ +[0-9:.-]+ +/, "", rest)
+    if (!(rest ~ /^[A-Za-z]:\\/ || index(rest, w) == 1)) next
+    n = split(t, a, /[:-]/)
+    if (n == 4) s = ((a[1] * 24 + a[2]) * 60 + a[3]) * 60 + a[4]
+    else { s = 0; for (i = 1; i <= n; i++) s = s * 60 + a[i] }
+    name = rest
+    if (match(rest, /[^\\\/]*\.[Ee][Xx][Ee]/)) name = substr(rest, RSTART, RLENGTH)
+    else { sub(/ .*/, "", name); sub(/.*\//, "", name) }
+    if (match(rest, /--type=[a-z-]+/)) name = name " " substr(rest, RSTART + 7, RLENGTH - 7)
+    printf "%s\t%.2f\t%s\n", pid, s, name
+  }'
+}
+
+# How busy Wine is: for an idle Steam this is what keeping it open costs.
+cmd_cpu() {
+  load_conf
+  local secs="${1:-30}" a b
+  case "$secs" in '' | *[!0-9]*) die "Use: skywalker.sh cpu [seconds]" ;; esac
+  [ "$secs" -gt 0 ] || secs=30
+  a="$(cpu_snapshot)"
+  [ -n "$a" ] || { echo "Wine is not running."; return 0; }
+  sleep "$secs"
+  b="$(cpu_snapshot)"
+  printf '%s\n=\n%s\n' "$a" "$b" | /usr/bin/awk -F '\t' -v secs="$secs" '
+    $0 == "=" { second = 1; next }
+    !second { before[$1] = $2; next }
+    ($1 in before) { d = $2 - before[$1]; if (d < 0) d = 0; total += d; n++; use[n] = d; name[n] = $3 }
+    END {
+      printf "Wine used %.1f%% of one processor core over %d seconds (%d programs).\n", 100 * total / secs, secs, n
+      for (k = 1; k <= 5; k++) {
+        best = 0
+        for (i = 1; i <= n; i++) if (use[i] > 0 && (best == 0 || use[i] > use[best])) best = i
+        if (best == 0) break
+        printf "  %5.1f%%  %s\n", 100 * use[best] / secs, name[best]
+        use[best] = 0
+      }
+    }'
+}
+
 cmd_stop() {
   load_conf
   need_wine
@@ -1178,6 +1332,7 @@ cmd_doctor() {
   echo "Settings:     $(settings_line) hud=$HUD"
   if [ -f "$DISPLAY_KEEP" ]; then echo "Display:      kept ($(tr '\n' ',' < "$DISPLAY_KEEP" | sed 's/,$//; s/,/, /g'))"; else echo "Display:      as the game writes it (display keep holds it)"; fi
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
+  if [ -f "$AGENT" ]; then echo "Autostart:    on (Steam is started at log-in for $PREWARM_MINUTES minutes)"; else echo "Autostart:    off"; fi
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
   echo "Processes:    $(count_wine_procs) from Wine, $(/bin/ps -x -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ') in all, limit $(ulimit -u) (Wine is held to $PROC_HEADROOM more than are running)"
   if game_running; then echo "Game running: yes"; else echo "Game running: no"; fi
@@ -1230,6 +1385,7 @@ cmd_uninstall() {
   printf 'Type yes to continue: '
   read -r answer
   [ "$answer" = yes ] || { echo "Nothing removed."; return 0; }
+  if [ -f "$AGENT" ]; then cmd_autostart off; fi
   case "$APP" in */"Skywalker Saga.app") rm -rf "$APP" ;; esac
   case "$HOME_DIR" in */skywalker) rm -rf "$HOME_DIR" ;; esac
   echo "Removed."
@@ -1244,6 +1400,9 @@ case "${1:-run}" in
   run) cmd_run ;;
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
+  prewarm) shift; cmd_prewarm "${1:-}" ;;
+  autostart) shift; cmd_autostart "${1:-status}" ;;
+  cpu) shift; cmd_cpu "${1:-30}" ;;
   display) shift; cmd_display "${1:-show}" ;;
   bench) shift; cmd_bench "${1:-test}" ;;
   summary) shift; summarise "$@" ;;
@@ -1254,5 +1413,5 @@ case "${1:-run}" in
   timeline) cmd_timeline ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

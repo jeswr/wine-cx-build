@@ -14,6 +14,7 @@ on:
       - 'scripts/test-guards.sh'
       - 'scripts/test-split.sh'
       - 'scripts/test-d3dmetal-install.sh'
+      - 'scripts/test-autostart.sh'
       - 'scripts/d3dtest.c'
   workflow_dispatch:
     inputs:
@@ -136,6 +137,13 @@ jobs:
       # Apple's D3DMetal cannot be used on the runner, so stand-in files with the
       # same names and layout take its place: this is a dry run of the launcher's
       # file handling for "graphics d3dmetal" and of the update that keeps it.
+      - name: Steam started at log-in (a stand-in for Steam)
+        run: |
+          if [ ! -x "$RUNNER_TEMP/sky/skywalker.sh" ]; then echo "The launcher was not installed; skipping."; exit 0; fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/test-autostart.sh
+
       - name: D3DMetal mode and the update that keeps it (stand-in files)
         run: |
           if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi

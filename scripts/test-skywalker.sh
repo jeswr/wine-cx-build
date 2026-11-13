@@ -287,14 +287,17 @@ case "$*" in
     kill "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" "$(cat "$FAKE_DIR/server.pid" 2>/dev/null)" 2>/dev/null
     rm -f "$FAKE_DIR/steam.pid" "$FAKE_DIR/server.pid"
     ;;
-  *-applaunch*)
+  *steam.exe*)
     if ! kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; then
       ( exec -a 'C:\Program Files (x86)\Steam\steam.exe' sleep 300 ) &
       echo $! > "$FAKE_DIR/steam.pid"
       ( exec -a "$(dirname "$0")/wineserver" sleep 300 ) &
       echo $! > "$FAKE_DIR/server.pid"
     fi
-    ( sleep 2; exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$FAKE_GAME\\game_dx11.EXE" sleep 4 ) &
+    case "$*" in *-applaunch*)
+      ( sleep 2; exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$FAKE_GAME\\game_dx11.EXE" sleep 4 ) &
+      ;;
+    esac
     ;;
 esac
 exit 0
@@ -356,7 +359,60 @@ sleep 2   # Steam is started in the background
 [ "$(cat "$FAKE_DIR/calls.txt")" = "C:\\Program Files (x86)\\Steam\\steam.exe
 C:\\Program Files (x86)\\Steam\\steam.exe -cef-disable-gpu -foo
 C:\\Program Files (x86)\\Steam\\steam.exe -foo -cef-disable-gpu" ] || { cat "$FAKE_DIR/calls.txt"; fail "the graphics process option was not handled as intended"; }
+bash "$S" stop > /dev/null
 [ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
+
+echo "-- Steam started ahead of the game"
+: > "$FAKE_DIR/calls.txt"
+bash "$S" cpu 1 > "$T/cpu0.txt"
+grep -q 'Wine is not running' "$T/cpu0.txt" || fail "cpu did not say that Wine is not running"
+if bash "$S" prewarm soon > /dev/null 2>&1; then fail "prewarm took a time that is not a number"; fi
+bash "$S" prewarm 0.2 > "$T/pre1.txt"
+grep -q 'Steam is starting in the background. It closes again in 0.2 minutes' "$T/pre1.txt" || fail "prewarm did not say what it does"
+sleep 2
+steam_alive || fail "prewarm did not start Steam"
+grep -q -e '-silent -nofriendsui -nochatui -cef-disable-gpu$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "prewarm did not start Steam alone with the usual options"; }
+if grep -q -e '-applaunch' "$FAKE_DIR/calls.txt"; then fail "prewarm started the game"; fi
+bash "$S" cpu 1 > "$T/cpu1.txt"
+grep -q 'Wine used [0-9.]*% of one processor core over 1 seconds (2 programs)' "$T/cpu1.txt" || { cat "$T/cpu1.txt"; fail "cpu gave no figure for the open Steam"; }
+bash "$S" prewarm 0.2 > "$T/pre2.txt"
+grep -q 'Steam is already open' "$T/pre2.txt" || fail "a second prewarm did not notice the open Steam"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/pre3.txt"
+grep -q 'Steam is still open, so the game starts straight away' "$T/pre3.txt" || fail "run did not use the Steam that prewarm started"
+[ "$(grep -c -e '-silent' "$FAKE_DIR/calls.txt")" = 1 ] || fail "Steam was started again for the game"
+if steam_alive; then fail "Steam was left open after the game although KEEP_STEAM_MINUTES is 0"; fi
+bash "$S" prewarm 0.1 > /dev/null
+sleep 2
+steam_alive || fail "the second prewarm did not start Steam"
+sleep 14
+if steam_alive; then fail "an unused prewarmed Steam was not closed after its time"; fi
+bash "$S" prewarm 0 > "$T/pre4.txt"
+grep -q 'stays open' "$T/pre4.txt" || fail "prewarm 0 did not say that Steam stays open"
+[ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "prewarm 0 set a timer"
+bash "$S" stop > /dev/null
+
+echo "-- start at log-in"
+printf '#!/bin/bash\necho "$*" >> "$FAKE_DIR/launchctl.txt"\n' > "$T/launchctl"
+chmod +x "$T/launchctl"
+export SKY_LAUNCHCTL="$T/launchctl"
+PL="$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist"
+bash "$S" autostart status | grep -q 'Autostart: off' || fail "autostart is not off to begin with"
+if bash "$S" autostart on > /dev/null 2>&1; then fail "autostart on worked without an installed launcher"; fi
+cp "$S" "$SKYWALKER_HOME/skywalker.sh"
+bash "$S" autostart on > "$T/auto1.txt"
+[ -f "$PL" ] || fail "autostart on wrote no log-in item"
+grep -q "<string>$SKYWALKER_HOME/skywalker.sh</string>" "$PL" || fail "the log-in item does not run the installed launcher"
+grep -q '<string>prewarm</string>' "$PL" || fail "the log-in item does not run prewarm"
+grep -q '<key>AbandonProcessGroup</key><true/>' "$PL" || fail "the log-in item would take Steam down with it"
+grep -q '<string>Interactive</string>' "$PL" || fail "the log-in item would run Steam throttled"
+if command -v plutil >/dev/null 2>&1; then plutil -lint "$PL"; fi
+grep -q "bootstrap gui/$(id -u) $PL" "$FAKE_DIR/launchctl.txt" || fail "macOS was not told about the log-in item"
+bash "$S" doctor > "$T/auto-doctor.txt"
+grep -q 'Autostart:    on' "$T/auto-doctor.txt" || fail "doctor does not show autostart on"
+bash "$S" autostart off > /dev/null
+[ ! -f "$PL" ] || fail "autostart off left the log-in item"
+grep -q "bootout gui/$(id -u)/io.github.jeswr.skywalker.prewarm" "$FAKE_DIR/launchctl.txt" || fail "macOS was not told to drop the log-in item"
+rm -f "$SKYWALKER_HOME/skywalker.sh"
 
 echo "-- the game's screen settings are held"
 CFG="$(dirname "$SAVES")/PCCONFIG.TXT"
