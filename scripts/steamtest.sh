@@ -5,7 +5,7 @@
 #
 # Usage: steamtest.sh <minutes to watch> [options for Steam...]
 # Needs: "skywalker.sh install" done, SKYWALKER_HOME and SKY_PREFIX set.
-# Optional: GRAPHICS=dxmt|wine (default wine), TRACE=<WINEDEBUG value> (default fixme-all),
+# Optional: GRAPHICS=split|dxmt|wine (default wine), TRACE=<WINEDEBUG value> (default fixme-all),
 #           STEAMTEST_OUT=<folder for logs and screenshots> (default ./steam-logs)
 # Written for the stock /bin/bash 3.2 on macOS.
 set -uo pipefail
@@ -134,7 +134,7 @@ for f in "$SKYWALKER_HOME"/logs/*; do
   if [ "$(wc -c < "$f")" -gt 6000000 ]; then
     # a trace run: keep the lines about window surfaces and transparency, a
     # count of every traced function, and the whole log compressed
-    grep -a -E 'shm|Flushing|ayered|alpha|dummy|CreateWindowEx|err:' "$f" > "$OUT/launcher/filtered.tmp" || true
+    grep -a -E 'shm|foreign|Flushing|ayered|alpha|dummy|CreateWindowEx|err:' "$f" > "$OUT/launcher/filtered.tmp" || true
     { head -n 8000 "$OUT/launcher/filtered.tmp"; echo '[... cut ...]'; tail -n 4000 "$OUT/launcher/filtered.tmp"; } > "$OUT/launcher/$(basename "$f").filtered.txt"
     rm -f "$OUT/launcher/filtered.tmp"
     grep -a -o -E '(trace|warn|err|fixme):[a-z_0-9]+:[A-Za-z_0-9]+' "$f" | sort | uniq -c | sort -rn | head -n 150 > "$OUT/launcher/$(basename "$f").functions.txt"
