@@ -358,4 +358,41 @@ C:\\Program Files (x86)\\Steam\\steam.exe -cef-disable-gpu -foo
 C:\\Program Files (x86)\\Steam\\steam.exe -foo -cef-disable-gpu" ] || { cat "$FAKE_DIR/calls.txt"; fail "the graphics process option was not handled as intended"; }
 [ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
 
+echo "-- the game's screen settings are held"
+CFG="$(dirname "$SAVES")/PCCONFIG.TXT"
+printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nBorderlessWindow 1\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$CFG"
+cp "$CFG" "$T/good.txt"
+bash "$S" display show > "$T/disp0.txt"
+grep -q 'Kept: nothing' "$T/disp0.txt" || fail "display show reports kept settings before any were kept"
+bash "$S" display check
+cmp -s "$CFG" "$T/good.txt" || fail "the settings file was changed although nothing is kept"
+bash "$S" display keep > "$T/disp1.txt"
+grep -q '   ScreenWidth 1440' "$T/disp1.txt" || fail "display keep did not list the screen width"
+grep -q '   WindowWidth 1440' "$T/disp1.txt" || fail "display keep did not list the window width"
+if grep -q 'ScreenSpaceReflections\|DoFEnabled\|Language' "$T/disp1.txt"; then fail "display keep took lines that are not about the screen"; fi
+bash "$S" display check > "$T/disp2.txt"
+[ ! -s "$T/disp2.txt" ] || fail "an unchanged settings file was reported as changed"
+cmp -s "$CFG" "$T/good.txt" || fail "an unchanged settings file was rewritten"
+# what an external monitor did on the Mac, plus a graphics line the player changed on purpose
+printf 'ScreenWidth 1280\r\nScreenHeight 800\r\nWindowWidth\t1280\r\nWindowHeight\t720\r\nBorderlessWindow 0\r\nScreenSpaceReflections 1\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$CFG"
+cp "$CFG" "$T/drift.txt"
+bash "$S" display check > "$T/disp3.txt"
+grep -q 'ScreenWidth 1280 -> 1440' "$T/disp3.txt" || fail "the reset did not say what it changed"
+printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nBorderlessWindow 1\r\nScreenSpaceReflections 1\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$T/want.txt"
+cmp -s "$CFG" "$T/want.txt" || { od -c "$CFG" | head -n 20; fail "the screen lines were not put back exactly (or another line was touched)"; }
+[ "$(find "$SKYWALKER_HOME/settings-backups" -name 'PCCONFIG-*.TXT' | wc -l | tr -d ' ')" = 1 ] || fail "no backup was made before the reset"
+cmp -s "$(find "$SKYWALKER_HOME/settings-backups" -name 'PCCONFIG-*.TXT')" "$T/drift.txt" || fail "the backup is not the file as it was"
+bash "$S" doctor > "$T/disp-doctor.txt"
+grep -q 'Display:      kept (ScreenWidth 1440, ScreenHeight 900' "$T/disp-doctor.txt" || fail "doctor does not show the kept screen settings"
+# a start does the same check
+cp "$T/drift.txt" "$CFG"
+sleep 1
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/disp-run.txt"
+grep -q "screen settings had changed and were put back" "$T/disp-run.txt" || fail "run did not put the screen settings back"
+cmp -s "$CFG" "$T/want.txt" || fail "run left the drifted screen settings"
+bash "$S" display off > /dev/null
+cp "$T/drift.txt" "$CFG"
+bash "$S" display check
+cmp -s "$CFG" "$T/drift.txt" || fail "display off did not stop the reset"
+
 echo "All launcher checks passed."

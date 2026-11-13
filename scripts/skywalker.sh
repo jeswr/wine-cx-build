@@ -16,6 +16,10 @@
 #                                split (default): DXMT for the game and Wine's own Direct3D for
 #                                Steam; dxmt or wine: one of them for everything; d3dmetal: Apple's
 #                                D3DMetal from your own copy of the Game Porting Toolkit (GPTK_DIR)
+#   skywalker.sh display keep|show|off
+#                                keep: remember the game's screen and window settings as they
+#                                are now and put them back before each start if something
+#                                changed them (an external monitor does); off: stop doing that
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
@@ -111,7 +115,9 @@ load_conf() {
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK; do
+  # which lines of the game's settings file "display keep" looks after (by the first word of the line)
+  : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -317,6 +323,103 @@ backup_saves() {
       case "$old" in "$SAVE_BACKUP_DIR"/20*) rm -rf "$old" ;; esac
     done
   fi
+}
+
+# ---------------------------------------------------------------- display
+
+# The game keeps its settings in PCCONFIG.TXT, one "Name value" per line. When
+# the screens change (an external monitor is plugged in or out) the game
+# rewrites the screen and window lines and keeps the new values for good.
+# "display keep" notes those lines as they are now, and every start puts them
+# back if they differ. No other line of the file is ever touched.
+DISPLAY_KEEP="$HOME_DIR/display.keep"
+
+pcconfig() {
+  local f
+  for f in "$PREFIX"/drive_c/users/*/AppData/Roaming/"Warner Bros. Interactive Entertainment"/*/PCCONFIG.TXT; do
+    if [ -f "$f" ]; then echo "$f"; return 0; fi
+  done
+  return 1
+}
+
+# the screen and window lines of a settings file, without line ends
+display_lines() {
+  /usr/bin/awk -v re="$DISPLAY_KEYS" '{ sub(/\r$/, "") } NF == 2 && $1 ~ re { print $1, $2 }' "$1"
+}
+
+display_guard() {
+  local f tmp changes dir old
+  [ -f "$DISPLAY_KEEP" ] || return 0
+  f="$(pcconfig)" || return 0
+  tmp="$HOME_DIR/.pcconfig.new"
+  # a kept line replaces the value of the same name; the line end is left as it was
+  /usr/bin/awk -v re="$DISPLAY_KEYS" '
+    NR == FNR { keep[$1] = $2; next }
+    {
+      cr = ""
+      if ($0 ~ /\r$/) cr = "\r"
+      line = $0
+      sub(/\r$/, "", line)
+      n = split(line, w, " ")
+      if (n == 2 && w[1] ~ re && (w[1] in keep) && keep[w[1]] != w[2]) {
+        sep = " "
+        if (match(line, /[ \t]+/)) sep = substr(line, RSTART, RLENGTH)
+        printf "%s %s -> %s\n", w[1], w[2], keep[w[1]] > "/dev/stderr"
+        printf "%s%s%s%s\n", w[1], sep, keep[w[1]], cr
+      } else print $0
+    }' "$DISPLAY_KEEP" "$f" > "$tmp" 2> "$tmp.changes" || { rm -f "$tmp" "$tmp.changes"; return 0; }
+  changes="$(tr '\n' ',' < "$tmp.changes" | sed 's/,$//; s/,/, /g')"
+  if [ -z "$changes" ] || [ ! -s "$tmp" ]; then
+    rm -f "$tmp" "$tmp.changes"
+    return 0
+  fi
+  dir="$HOME_DIR/settings-backups"
+  mkdir -p "$dir"
+  cp -p "$f" "$dir/PCCONFIG-$(date +%Y%m%d-%H%M%S).TXT"
+  ls -1 "$dir"/PCCONFIG-*.TXT 2>/dev/null | sort -r | tail -n +11 | while read -r old; do
+    case "$old" in "$dir"/PCCONFIG-*) rm -f "$old" ;; esac
+  done
+  cat "$tmp" > "$f"
+  rm -f "$tmp" "$tmp.changes"
+  say "The game's screen settings had changed and were put back: $changes"
+  say "(To keep new screen settings instead, set them in the game, quit it, then: bash $HOME_DIR/skywalker.sh display keep)"
+}
+
+cmd_display() {
+  local f
+  load_conf
+  case "${1:-show}" in
+    keep)
+      f="$(pcconfig)" || die "The game has not written its settings file yet. Start the game once, set the picture, quit, then run this again."
+      game_running && die "Quit the game first: it writes its settings when it closes."
+      display_lines "$f" > "$DISPLAY_KEEP.new"
+      [ -s "$DISPLAY_KEEP.new" ] || { rm -f "$DISPLAY_KEEP.new"; die "No screen or window lines found in $f"; }
+      mv "$DISPLAY_KEEP.new" "$DISPLAY_KEEP"
+      say "These screen settings are now put back before every start:"
+      sed 's/^/   /' "$DISPLAY_KEEP"
+      ;;
+    check) display_guard ;;   # what every start does
+    off)
+      rm -f "$DISPLAY_KEEP"
+      say "Screen settings are left as the game writes them."
+      ;;
+    show)
+      if f="$(pcconfig)"; then
+        echo "Settings file: $f"
+        echo "Now:"
+        display_lines "$f" | sed 's/^/   /'
+      else
+        echo "Settings file: not written by the game yet"
+      fi
+      if [ -f "$DISPLAY_KEEP" ]; then
+        echo "Kept (put back before every start):"
+        sed 's/^/   /' "$DISPLAY_KEEP"
+      else
+        echo "Kept: nothing (bash $HOME_DIR/skywalker.sh display keep)"
+      fi
+      ;;
+    *) die "Use: skywalker.sh display keep|show|off" ;;
+  esac
 }
 
 # ---------------------------------------------------------------- install
@@ -818,6 +921,7 @@ play() {
   date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
   rm -f "$IDLE"
   backup_saves
+  display_guard
   wine_env
   if our_wineserver_running && steam_running; then
     if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
@@ -1072,6 +1176,7 @@ cmd_doctor() {
     echo "D3DMetal:     Apple's files not found in $GPTK_DIR (only needed for: graphics d3dmetal)"
   fi
   echo "Settings:     $(settings_line) hud=$HUD"
+  if [ -f "$DISPLAY_KEEP" ]; then echo "Display:      kept ($(tr '\n' ',' < "$DISPLAY_KEEP" | sed 's/,$//; s/,/, /g'))"; else echo "Display:      as the game writes it (display keep holds it)"; fi
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
   echo "Processes:    $(count_wine_procs) from Wine, $(/bin/ps -x -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ') in all, limit $(ulimit -u) (Wine is held to $PROC_HEADROOM more than are running)"
@@ -1139,6 +1244,7 @@ case "${1:-run}" in
   run) cmd_run ;;
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
+  display) shift; cmd_display "${1:-show}" ;;
   bench) shift; cmd_bench "${1:-test}" ;;
   summary) shift; summarise "$@" ;;
   backup) load_conf; backup_saves ;;
@@ -1148,5 +1254,5 @@ case "${1:-run}" in
   timeline) cmd_timeline ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
