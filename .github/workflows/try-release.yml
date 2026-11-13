@@ -1,0 +1,58 @@
+name: Try a release on the runner
+
+# Downloads a published release and runs scripts/selftest.sh on it. This takes
+# a few minutes, where a full build takes over an hour, so it is the quick way
+# to find out why a build does not start.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-release.yml'
+      - 'scripts/selftest.sh'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        default: "wine-cx-26.3.0-2"
+      asset:
+        description: Package file name in that release
+        default: "wine-cx-26.3.0.tar.xz"
+
+permissions:
+  contents: read
+
+jobs:
+  try:
+    runs-on: macos-15-intel
+    timeout-minutes: 40
+    env:
+      TAG: ${{ inputs.tag || 'wine-cx-26.3.0-2' }}
+      ASSET: ${{ inputs.asset || 'wine-cx-26.3.0.tar.xz' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release
+        run: |
+          curl -fL --retry 3 -o pkg.tar.xz "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET}"
+          mkdir -p "$RUNNER_TEMP/wine"
+          tar -xJf pkg.tar.xz -C "$RUNNER_TEMP/wine"
+          ls "$RUNNER_TEMP/wine"
+          cat "$RUNNER_TEMP/wine/BUILD-INFO" 2>/dev/null || true
+
+      - name: Add the run-time libraries if the release has none
+        run: |
+          if [ ! -e "$RUNNER_TEMP/wine/lib/libfreetype.6.dylib" ]; then
+            brew install freetype gnutls molten-vk sdl2
+            bash scripts/bundle-dylibs.sh "$RUNNER_TEMP/wine"
+          fi
+
+      - name: Self-test
+        run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 180
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-logs
+          path: selftest-logs
+          if-no-files-found: ignore
