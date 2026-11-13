@@ -1,0 +1,172 @@
+win32u: Let another process draw to a window (fixes Steam's blank windows).
+
+A DC for a window that belongs to another process has no window surface,
+so everything drawn to it is lost. Chromium's software compositor draws
+that way (its GPU process calls GetDC() on the browser process's window
+and blits each frame), and Steam uses it whenever its GPU process cannot
+start, which leaves every Steam window blank on macOS.
+
+Such a DC now gets a shared memory surface, the one CX HACK 23950 already
+uses for child windows of a foreign parent, and it is flushed to the
+owning process when the DC is released.
+
+--- a/dlls/win32u/dce.c
++++ b/dlls/win32u/dce.c
+@@ -934,6 +934,122 @@
+ /* CX HACK 23950 - END */
+ 
+ 
++/* Cross-process drawing.
++ *
++ * A DC for a window that belongs to another process has no window surface,
++ * so everything drawn to it is lost. Chromium's software compositor draws
++ * exactly that way: its GPU process calls GetDC() on a window of the browser
++ * process and blits each frame to it. Steam falls back to that compositor
++ * whenever its GPU process cannot start, and its windows then stay blank.
++ *
++ * Give such a DC a shared memory surface, like the one CX HACK 23950 uses
++ * for child windows of a foreign parent, and flush it when the DC is
++ * released. The process that owns the window then copies the pixels into
++ * its own window (WM_WINE_FLUSHSHMSURFACE).
++ */
++
++struct foreign_surface
++{
++    struct list            entry;
++    HWND                   hwnd;
++    struct window_surface *surface;
++};
++
++static struct list foreign_surfaces = LIST_INIT( foreign_surfaces );
++static pthread_mutex_t foreign_surfaces_lock = PTHREAD_MUTEX_INITIALIZER;
++
++/* returns a surface for the client area of a window of another process, or NULL */
++static struct window_surface *get_foreign_window_surface( HWND hwnd, const RECT *win_rect )
++{
++    struct foreign_surface *entry, *next, *found = NULL;
++    struct window_surface *surface, *old = NULL;
++    WND *win;
++
++    if (!hwnd || IsRectEmpty( win_rect )) return NULL;
++    if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP) return NULL;
++    if (win != WND_OTHER_PROCESS)
++    {
++        release_win_ptr( win );
++        return NULL;
++    }
++
++    pthread_mutex_lock( &foreign_surfaces_lock );
++
++    LIST_FOR_EACH_ENTRY( entry, &foreign_surfaces, struct foreign_surface, entry )
++    {
++        if (entry->hwnd != hwnd) continue;
++        found = entry;
++        old = entry->surface;
++        break;
++    }
++
++    /* returns the old surface, with one more reference, if the size is unchanged */
++    surface = create_shm_surface( hwnd, hwnd, win_rect, old );
++
++    if (found)
++    {
++        if (surface != old)
++        {
++            window_surface_release( old );
++            if (surface)
++            {
++                window_surface_add_ref( surface );
++                found->surface = surface;
++            }
++            else
++            {
++                list_remove( &found->entry );
++                free( found );
++            }
++        }
++    }
++    else if (surface)
++    {
++        /* forget the windows that are gone */
++        LIST_FOR_EACH_ENTRY_SAFE( entry, next, &foreign_surfaces, struct foreign_surface, entry )
++        {
++            if (is_window( entry->hwnd )) continue;
++            list_remove( &entry->entry );
++            window_surface_release( entry->surface );
++            free( entry );
++        }
++        if ((entry = malloc( sizeof(*entry) )))
++        {
++            entry->hwnd = hwnd;
++            entry->surface = surface;
++            window_surface_add_ref( surface );
++            list_add_tail( &foreign_surfaces, &entry->entry );
++        }
++    }
++
++    pthread_mutex_unlock( &foreign_surfaces_lock );
++
++    TRACE( "hwnd %p rect %s surface %p\n", hwnd, wine_dbgstr_rect( win_rect ), surface );
++    return surface;
++}
++
++/* sends what was drawn to a window of another process to its owner */
++static void flush_foreign_window_surface( HWND hwnd )
++{
++    struct window_surface *surface = NULL;
++    struct foreign_surface *entry;
++
++    pthread_mutex_lock( &foreign_surfaces_lock );
++    LIST_FOR_EACH_ENTRY( entry, &foreign_surfaces, struct foreign_surface, entry )
++    {
++        if (entry->hwnd != hwnd) continue;
++        surface = entry->surface;
++        window_surface_add_ref( surface );
++        break;
++    }
++    pthread_mutex_unlock( &foreign_surfaces_lock );
++
++    if (!surface) return;
++    window_surface_flush( surface );
++    window_surface_release( surface );
++}
++
++
+ /*******************************************************************
+  *           register_window_surface
+  *
+@@ -1079,6 +1195,10 @@
+             if (surface) window_surface_add_ref( surface );
+             release_win_ptr( win );
+         }
++        /* a window of another process: draw to a shared surface that its owner displays */
++        else if (win == WND_OTHER_PROCESS && !(flags & DCX_WINDOW) &&
++                 (surface = get_foreign_window_surface( dce->hwnd, &win_rect )))
++            top_rect = win_rect;
+     }
+ 
+     if (!surface) SetRectEmpty( &top_rect );
+@@ -1434,6 +1554,7 @@
+ {
+     struct list drawables = LIST_INIT( drawables );
+     struct dce *dce;
++    HWND dce_hwnd = 0;
+     BOOL ret = FALSE;
+ 
+     TRACE( "%p %p\n", hwnd, hdc );
+@@ -1442,6 +1563,7 @@
+     dce = get_dc_dce( hdc );
+     if (dce && dce->count && dce->hwnd)
+     {
++        dce_hwnd = dce->hwnd;
+         if (!(dce->flags & DCX_NORESETATTRS)) set_dce_flags( dce->hdc, DCHF_RESETDC );
+         if (end_paint || (dce->flags & DCX_CACHE)) delete_clip_rgn( dce );
+         if (dce->flags & DCX_CACHE)
+@@ -1455,6 +1577,7 @@
+     user_unlock();
+ 
+     release_opengl_drawables( &drawables );
++    if (dce_hwnd) flush_foreign_window_surface( dce_hwnd );
+     return ret;
+ }
+ 
