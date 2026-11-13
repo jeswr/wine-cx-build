@@ -60,8 +60,27 @@ grep -q "Game running: no" "$T/doctor.txt" || fail "game reported running when i
 ( exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$GAME\\game_dx11.EXE" sleep 30 ) &
 fake=$!
 sleep 1
-bash "$S" doctor | grep -q "Game running: yes" || { kill "$fake"; fail "running game not detected"; }
+bash "$S" doctor > "$T/doctor1.txt"
+grep -q "Game running: yes" "$T/doctor1.txt" || { kill "$fake"; fail "running game not detected"; }
 kill "$fake" 2>/dev/null || true
+
+echo "-- graphics switch"
+W="$SKYWALKER_HOME/wine/fake-1"
+for arch in x86_64-windows i386-windows; do
+  mkdir -p "$W/lib/wine/$arch" "$W/orig-dlls/$arch"
+  echo dxmt > "$W/lib/wine/$arch/d3d11.dll"
+  echo wine > "$W/orig-dlls/$arch/d3d11.dll"
+done
+mkdir -p "$W/bin"
+printf '#!/bin/sh\nexit 0\n' > "$W/bin/wine"
+chmod +x "$W/bin/wine"
+ln -sfn fake-1 "$SKYWALKER_HOME/wine/current"
+bash "$S" graphics wine
+grep -q wine "$W/lib/wine/x86_64-windows/d3d11.dll" || fail "switch to Wine's Direct3D did not copy the DLL"
+bash "$S" graphics dxmt
+grep -q dxmt "$W/lib/wine/i386-windows/d3d11.dll" || fail "switch back to DXMT did not restore the DLL"
+bash "$S" doctor > "$T/doctor2.txt"
+grep -q "Graphics:     dxmt" "$T/doctor2.txt" || fail "doctor does not report the graphics layer"
 
 echo "-- frame summary"
 : > "$T/wine.log"

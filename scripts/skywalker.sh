@@ -11,6 +11,7 @@
 #   skywalker.sh backup          back up the save files now
 #   skywalker.sh update          install the latest build; the previous one is kept
 #   skywalker.sh rollback        switch back to the previous build
+#   skywalker.sh graphics dxmt|wine   use DXMT (default) or Wine's own Direct3D 11
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh uninstall       remove the app icon and the launcher's own folder
@@ -86,7 +87,7 @@ load_conf() {
 }
 
 settings_line() {
-  echo "msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX"
+  echo "graphics=$(cat "$CUR/GRAPHICS" 2>/dev/null || echo dxmt) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX"
 }
 
 # ---------------------------------------------------------------- helpers
@@ -145,6 +146,8 @@ wine_env() {
   export WINEPREFIX="$PREFIX"
   export USER="$WINE_USER"
   export WINEDEBUG="${WINEDEBUG:--all}"
+  # no Wine Mono / Gecko install prompts: neither Steam nor the game needs them
+  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=}"
   # the build keeps FreeType, GnuTLS, SDL2 and MoltenVK in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
   if [ "$MSYNC" = 1 ]; then export WINEMSYNC=1; else unset WINEMSYNC; fi
@@ -358,6 +361,40 @@ cmd_rollback() {
   say "Now using $prev (was $cur)"
 }
 
+# The build ships DXMT in place of Wine's own Direct3D 10/11 DLLs and keeps
+# Wine's copies in orig-dlls. This swaps the two sets within the build in use.
+cmd_graphics() {
+  local want="${1:-}" w arch f b now
+  need_wine
+  our_wineserver_running && die "Quit the game and Steam first."
+  w="$(cd "$CUR" && pwd -P)"
+  now="dxmt"
+  [ -f "$w/GRAPHICS" ] && now="$(cat "$w/GRAPHICS")"
+  case "$want" in
+    dxmt|wine) ;;
+    *) echo "Graphics in use: $now. Switch with: skywalker.sh graphics dxmt|wine"; return 0 ;;
+  esac
+  if [ "$want" = "$now" ]; then echo "Already using $now."; return 0; fi
+  [ -d "$w/orig-dlls" ] || die "This build has no orig-dlls folder, so there is nothing to switch to."
+  for arch in x86_64-windows i386-windows x86_64-unix; do
+    [ -d "$w/orig-dlls/$arch" ] || continue
+    mkdir -p "$w/dxmt-dlls/$arch"
+    for f in "$w/orig-dlls/$arch"/*; do
+      [ -f "$f" ] || continue
+      b="$(basename "$f")"
+      if [ "$want" = wine ]; then
+        # keep DXMT's copy the first time, then put Wine's own back
+        [ -f "$w/dxmt-dlls/$arch/$b" ] || cp "$w/lib/wine/$arch/$b" "$w/dxmt-dlls/$arch/$b"
+        cp "$f" "$w/lib/wine/$arch/$b"
+      else
+        [ -f "$w/dxmt-dlls/$arch/$b" ] && cp "$w/dxmt-dlls/$arch/$b" "$w/lib/wine/$arch/$b"
+      fi
+    done
+  done
+  echo "$want" > "$w/GRAPHICS"
+  say "Graphics for $(current_tag): $want"
+}
+
 # ---------------------------------------------------------------- running
 
 shutdown_wine() {
@@ -553,6 +590,7 @@ cmd_doctor() {
   if [ -f "$(steam_dir)/steam.exe" ]; then echo "Steam:        installed"; else echo "Steam:        MISSING from the bottle"; fi
   name="$(game_dir_name || true)"
   if [ -n "$name" ]; then echo "Game:         $name"; else echo "Game:         not installed in Steam (ID $APPID)"; fi
+  echo "Graphics:     $(cat "$CUR/GRAPHICS" 2>/dev/null || echo dxmt)"
   echo "Settings:     $(settings_line) hud=$HUD"
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
@@ -578,6 +616,7 @@ case "${1:-run}" in
   install) shift; cmd_install "${1:-}" ;;
   update) cmd_install "" ;;
   rollback) cmd_rollback ;;
+  graphics) shift; load_conf; cmd_graphics "${1:-}" ;;
   run) cmd_run ;;
   steam) cmd_steam ;;
   stop) cmd_stop ;;
@@ -587,5 +626,5 @@ case "${1:-run}" in
   app) load_conf; create_app ;;
   doctor) cmd_doctor ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
