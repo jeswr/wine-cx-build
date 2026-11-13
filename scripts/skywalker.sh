@@ -1302,6 +1302,16 @@ cmd_bench() {
 
 # ---------------------------------------------------------------- upkeep
 
+# which of the named files a folder has: "d3d11.dll dxgi.dll" or "d3d11.dll, not in the toolkit: dxgi.dll"
+d3dm_have() {
+  local dir="$1" f have="" miss=""
+  shift
+  for f in "$@"; do
+    if [ -e "$dir/$f" ]; then have="$have $f"; else miss="$miss $f"; fi
+  done
+  if [ -n "$miss" ]; then echo "${have# }, not in the toolkit:$miss"; else echo "${have# }"; fi
+}
+
 cmd_doctor() {
   load_conf
   local name n
@@ -1323,9 +1333,9 @@ cmd_doctor() {
   echo "Graphics:     $(graphics_now)"
   if name="$(gptk_find)"; then
     echo "D3DMetal:     Apple's files found in $GPTK_DIR"
-    echo "              Windows side: ${name%%|*}/x86_64-windows ($(ls "${name%%|*}/x86_64-windows" 2>/dev/null | tr '\n' ' '))"
-    echo "              Unix side:    ${name%%|*}/x86_64-unix ($(ls "${name%%|*}/x86_64-unix" 2>/dev/null | tr '\n' ' '))"
-    echo "              Framework:    ${name#*|} ($(ls "${name#*|}" 2>/dev/null | tr '\n' ' '))"
+    echo "              Windows side: ${name%%|*}/x86_64-windows ($(d3dm_have "${name%%|*}/x86_64-windows" $D3DM_WIN))"
+    echo "              Unix side:    ${name%%|*}/x86_64-unix ($(d3dm_have "${name%%|*}/x86_64-unix" $D3DM_UNIX))"
+    echo "              Framework:    ${name#*|} ($(d3dm_have "${name#*|}" libd3dshared.dylib D3DMetal.framework))"
   else
     echo "D3DMetal:     Apple's files not found in $GPTK_DIR (only needed for: graphics d3dmetal)"
   fi
