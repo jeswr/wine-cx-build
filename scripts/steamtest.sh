@@ -76,6 +76,12 @@ hang_report() {
   local tag="$1" log addr pid n=0 f
   log="$(ls -t "$SKYWALKER_HOME"/logs/steam-*.log 2>/dev/null | head -n 1)"
   [ -n "$log" ] || return 0
+  # a build with patches/0002 survives the bad write and reports it instead
+  if grep -a 'cannot write I/O status block' "$log" > "$OUT/iosb-$tag.txt"; then
+    note "Wine caught $(wc -l < "$OUT/iosb-$tag.txt" | tr -d ' ') bad status block write(s): $(head -n 1 "$OUT/iosb-$tag.txt" | cut -c1-240)"
+  else
+    rm -f "$OUT/iosb-$tag.txt"
+  fi
   addr="$(grep -a -o 'nested exception on signal stack addr 0x[0-9a-f]*' "$log" | head -n 1 | sed 's/.* //')"
   [ -n "$addr" ] || return 0
   note "a thread died in Wine's fault handler at $addr; recording where that is"

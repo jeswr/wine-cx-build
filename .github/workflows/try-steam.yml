@@ -22,24 +22,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: arm-timing-1
+          - name: arm-1
             runner: macos-15
-          - name: arm-timing-2
+          - name: arm-2
             runner: macos-15
-          - name: arm-timing-3
+          - name: arm-3
             runner: macos-15
+          - name: arm-4
+            runner: macos-15
+          - name: intel-1
+            runner: macos-15-intel
+          - name: intel-2
+            runner: macos-15-intel
     env:
-      TAG: wine-cx-26.3.0-patched-6
+      TAG: wine-cx-26.3.0-patched-7
       GRAPHICS: split
       TRACE: fixme-all
       FIRST_TRACE: fixme-all
-      MINUTES: "3"
+      MINUTES: "2"
       # one start of Steam per line, timed up to the sign-in screen
       ROUNDS: |-
-        +gpu
 
-        +gpu -silent
-        -silent
+        +gpu
     steps:
       - uses: actions/checkout@v4
 
