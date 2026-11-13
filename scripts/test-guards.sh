@@ -36,6 +36,9 @@ echo "== 2. watchdog test (limit 3)"
 rm -f "$SKYWALKER_HOME/logs/watchdog.log"
 SKY_MAX_WINE_PROCS=3 /bin/bash "$SKY" wine cmd /c "ping -n 120 127.0.0.1" > /dev/null 2>&1 &
 pid=$!
+# wait until Wine is up, so that "no processes" below means stopped and not "not started yet"
+t=0
+while [ "$(count)" = 0 ] && [ "$t" -lt 60 ]; do sleep 1; t=$((t + 1)); done
 if wait_for_zero 90 && [ "$(sleep 5; count)" = 0 ]; then
   echo "watchdog stopped Wine"
 else

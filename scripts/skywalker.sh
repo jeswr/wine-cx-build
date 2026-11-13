@@ -811,7 +811,8 @@ function run(argv) {
     if (!want[String(w.kCGWindowOwnerPID)]) return;
     var b = w.kCGWindowBounds || {};
     out.push([w.kCGWindowOwnerPID, Math.round(b.Width) + 'x' + Math.round(b.Height),
-      'layer ' + w.kCGWindowLayer, w.kCGWindowOwnerName || '?', w.kCGWindowName || ''].join('\t'));
+      'layer ' + w.kCGWindowLayer, w.kCGWindowOwnerName || '?', w.kCGWindowName || '',
+      'at ' + Math.round(b.X) + ',' + Math.round(b.Y), 'alpha ' + w.kCGWindowAlpha].join('\t'));
   });
   return out.join('\n');
 }
