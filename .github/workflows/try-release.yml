@@ -12,6 +12,8 @@ on:
       - 'scripts/bundle-dylibs.sh'
       - 'scripts/skywalker.sh'
       - 'scripts/test-guards.sh'
+      - 'scripts/test-split.sh'
+      - 'scripts/d3dtest.c'
   workflow_dispatch:
     inputs:
       tag:
@@ -119,6 +121,16 @@ jobs:
           export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
           /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
           bash scripts/test-guards.sh "$PWD/crash.exe"
+
+      - name: Split graphics (DXMT for the game only)
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          command -v x86_64-w64-mingw32-gcc > /dev/null || brew install mingw-w64
+          x86_64-w64-mingw32-gcc -O1 -o d3dtest.exe scripts/d3dtest.c
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
+          bash scripts/test-split.sh "$PWD/d3dtest.exe"
       - name: Upload the logs
         if: always()
         uses: actions/upload-artifact@v4

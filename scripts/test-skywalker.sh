@@ -66,13 +66,18 @@ kill "$fake" 2>/dev/null || true
 
 echo "-- graphics switch"
 W="$SKYWALKER_HOME/wine/fake-1"
+GDIR="$STEAM/steamapps/common/$GAME"
+# A stand-in for a DXMT DLL: Wine's mark at byte 64 and a mention of winemetal
+fake_dxmt() { printf '%064d%s%s' 0 'Wine builtin DLL' "................ winemetal.dll dxmt $1" > "$2"; }
 for arch in x86_64-windows i386-windows; do
   mkdir -p "$W/lib/wine/$arch" "$W/orig-dlls/$arch"
-  echo dxmt > "$W/lib/wine/$arch/d3d11.dll"
-  echo wine > "$W/orig-dlls/$arch/d3d11.dll"
+  for d in d3d11 dxgi d3d10core; do
+    fake_dxmt "$d" "$W/lib/wine/$arch/$d.dll"
+    echo "wine $d" > "$W/orig-dlls/$arch/$d.dll"
+  done
 done
 mkdir -p "$W/bin"
-printf '#!/bin/bash\necho "fake-wine $* prefix=$WINEPREFIX user=$USER"\necho "limit=$(ulimit -u)"\nexit 0\n' > "$W/bin/wine"
+printf '#!/bin/bash\necho "fake-wine $* prefix=$WINEPREFIX user=$USER"\necho "limit=$(ulimit -u)"\necho "overrides=$WINEDLLOVERRIDES"\nexit 0\n' > "$W/bin/wine"
 chmod +x "$W/bin/wine"
 ln -sfn fake-1 "$SKYWALKER_HOME/wine/current"
 bash "$S" graphics wine
@@ -81,6 +86,36 @@ bash "$S" graphics dxmt
 grep -q dxmt "$W/lib/wine/i386-windows/d3d11.dll" || fail "switch back to DXMT did not restore the DLL"
 bash "$S" doctor > "$T/doctor2.txt"
 grep -q "Graphics:     dxmt" "$T/doctor2.txt" || fail "doctor does not report the graphics layer"
+bash "$S" wine cmd > "$T/wine-ovr.txt"
+if grep -q 'd3d11' "$T/wine-ovr.txt"; then fail "DLL order is changed outside split graphics"; fi
+
+echo "-- split graphics: DXMT for the game only"
+bash "$S" graphics split
+for arch in x86_64-windows i386-windows; do
+  grep -q "wine d3d11" "$W/lib/wine/$arch/d3d11.dll" || fail "split did not put Wine's Direct3D into the build ($arch)"
+done
+for d in d3d11 dxgi d3d10core; do
+  grep -a -q "winemetal.dll dxmt $d" "$GDIR/$d.dll" || fail "split did not give the game DXMT's $d.dll"
+  if grep -a -q "Wine builtin DLL" "$GDIR/$d.dll"; then fail "the game's $d.dll still carries Wine's builtin mark"; fi
+  [ "$(wc -c < "$GDIR/$d.dll")" = "$(wc -c < "$W/dxmt-dlls/x86_64-windows/$d.dll")" ] || fail "the game's $d.dll changed size"
+  grep -a -q "Wine builtin DLL" "$W/dxmt-dlls/x86_64-windows/$d.dll" || fail "the saved DXMT $d.dll was altered"
+done
+bash "$S" doctor > "$T/doctor3.txt"
+grep -q "Graphics:     split" "$T/doctor3.txt" || fail "doctor does not report split graphics"
+bash "$S" wine cmd > "$T/wine-ovr.txt"
+grep -q 'overrides=.*d3d11,dxgi,d3d10core=n,b' "$T/wine-ovr.txt" || fail "split graphics does not put the game's own DLLs first"
+bash "$S" graphics wine
+for d in d3d11 dxgi d3d10core; do
+  [ ! -e "$GDIR/$d.dll" ] || fail "leaving split graphics left $d.dll in the game folder"
+done
+[ ! -e "$GDIR/.skywalker-dxmt" ] || fail "leaving split graphics left the note in the game folder"
+echo "the game's own" > "$GDIR/dxgi.dll"
+if bash "$S" graphics split > "$T/split-foreign.txt" 2>&1; then fail "split replaced a DLL that belongs to the game"; fi
+grep -q "the game's own" "$GDIR/dxgi.dll" || fail "the game's own dxgi.dll was overwritten"
+rm -f "$GDIR/dxgi.dll"
+bash "$S" graphics dxmt
+grep -a -q "winemetal.dll dxmt d3d11" "$W/lib/wine/x86_64-windows/d3d11.dll" || fail "DXMT was not restored after split"
+[ ! -e "$GDIR/d3d11.dll" ] || fail "a failed split left files in the game folder"
 
 echo "-- wine passthrough"
 bash "$S" wine cmd /c ver > "$T/wine.txt"

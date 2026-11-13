@@ -31,6 +31,7 @@ This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games
 | `skywalker.sh doctor` | Shows what is installed and what is missing |
 | `skywalker.sh wine <args>` | Runs any Wine program with the launcher's settings, for troubleshooting |
 | `skywalker.sh windows` | Lists the windows Wine has on screen, to tell "nothing is shown" from "hidden behind something" |
+| `skywalker.sh graphics split\|dxmt\|wine` | `split` (the default) gives DXMT to the game only and leaves Steam on Wine's own Direct3D, because DXMT cannot draw Steam's windows; `dxmt` or `wine` uses one of them for everything |
 | `skywalker.sh stop` | Shuts down Steam and Wine, and ends any Wine process left behind |
 
 Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame counter). `SKY_UPSCALE=1 skywalker.sh bench upscaled` overrides one for a single run.

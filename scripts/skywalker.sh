@@ -12,7 +12,8 @@
 #   skywalker.sh backup          back up the save files now
 #   skywalker.sh update          install the latest build; the previous one is kept
 #   skywalker.sh rollback        switch back to the previous build
-#   skywalker.sh graphics dxmt|wine   use DXMT (default) or Wine's own Direct3D 11
+#   skywalker.sh graphics split|dxmt|wine   split (default): DXMT for the game and Wine's own
+#                                Direct3D for Steam; dxmt or wine: one of them for everything
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
@@ -95,7 +96,7 @@ load_conf() {
 }
 
 settings_line() {
-  echo "graphics=$(cat "$CUR/GRAPHICS" 2>/dev/null || echo dxmt) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX"
+  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX"
 }
 
 # ---------------------------------------------------------------- helpers
@@ -188,7 +189,10 @@ wine_env() {
   # winedbg.exe off: a crashing program must just exit. With the debugger on,
   # a crash loop once spawned hundreds of winedbg/conhost processes and filled
   # the Mac's process table.
-  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=;winedbg.exe=d}"
+  local ovr="mscoree=;mshtml=;winedbg.exe=d"
+  # split graphics: the game's own copies of these (DXMT) come before Wine's
+  if [ "$(graphics_now)" = split ]; then ovr="$ovr;d3d11,dxgi,d3d10core=n,b"; fi
+  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-$ovr}"
   # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
   if [ "$MSYNC" = 1 ]; then export WINEMSYNC=1; else unset WINEMSYNC; fi
@@ -223,6 +227,7 @@ prepare_prefix() {
   if [ -f "$src" ] && [ -d "$PREFIX/drive_c/windows/syswow64" ] && ! /usr/bin/cmp -s "$src" "$dst" 2>/dev/null; then
     cp "$src" "$dst"
   fi
+  if [ "$(graphics_now)" = split ]; then game_dxmt_on; else game_dxmt_off; fi
 }
 
 # ---------------------------------------------------------------- saves
@@ -388,6 +393,7 @@ cmd_install() {
     fi
   fi
   create_app
+  if [ ! -f "$CUR/GRAPHICS" ] && [ -d "$CUR/orig-dlls" ]; then apply_graphics split; fi
   say "Done. Open \"Skywalker Saga\" from your Applications folder, or run: bash $HOME_DIR/skywalker.sh run"
 }
 
@@ -404,18 +410,22 @@ cmd_rollback() {
 
 # The build ships DXMT in place of Wine's own Direct3D 10/11 DLLs and keeps
 # Wine's copies in orig-dlls. This swaps the two sets within the build in use.
-cmd_graphics() {
-  local want="${1:-}" w arch f b now
-  need_wine
-  our_wineserver_running && die "Quit the game and Steam first."
+graphics_now() { cat "$CUR/GRAPHICS" 2>/dev/null || echo dxmt; }
+
+GAME_DLLS="d3d11.dll dxgi.dll d3d10core.dll"
+
+game_dir() {
+  local n
+  n="$(game_dir_name)" || return 1
+  [ -n "$n" ] || return 1
+  echo "$(steam_dir)/steamapps/common/$n"
+}
+
+# Puts Wine's own Direct3D ("wine") or DXMT ("dxmt") into the build's DLL folder.
+# The build arrives with DXMT there; its copies are kept in dxmt-dlls the first time.
+set_build_dlls() {
+  local want="$1" w arch f b
   w="$(cd "$CUR" && pwd -P)"
-  now="dxmt"
-  [ -f "$w/GRAPHICS" ] && now="$(cat "$w/GRAPHICS")"
-  case "$want" in
-    dxmt|wine) ;;
-    *) echo "Graphics in use: $now. Switch with: skywalker.sh graphics dxmt|wine"; return 0 ;;
-  esac
-  if [ "$want" = "$now" ]; then echo "Already using $now."; return 0; fi
   [ -d "$w/orig-dlls" ] || die "This build has no orig-dlls folder, so there is nothing to switch to."
   for arch in x86_64-windows i386-windows x86_64-unix; do
     [ -d "$w/orig-dlls/$arch" ] || continue
@@ -423,17 +433,97 @@ cmd_graphics() {
     for f in "$w/orig-dlls/$arch"/*; do
       [ -f "$f" ] || continue
       b="$(basename "$f")"
+      [ -f "$w/dxmt-dlls/$arch/$b" ] || cp "$w/lib/wine/$arch/$b" "$w/dxmt-dlls/$arch/$b"
       if [ "$want" = wine ]; then
-        # keep DXMT's copy the first time, then put Wine's own back
-        [ -f "$w/dxmt-dlls/$arch/$b" ] || cp "$w/lib/wine/$arch/$b" "$w/dxmt-dlls/$arch/$b"
         cp "$f" "$w/lib/wine/$arch/$b"
       else
-        [ -f "$w/dxmt-dlls/$arch/$b" ] && cp "$w/dxmt-dlls/$arch/$b" "$w/lib/wine/$arch/$b"
+        cp "$w/dxmt-dlls/$arch/$b" "$w/lib/wine/$arch/$b"
       fi
     done
   done
+}
+
+# DXMT's DLLs are made to live in Wine's own folder and carry a mark that says
+# so. Wine ignores a marked DLL that sits next to a program and loads its own
+# instead, so the copy for the game folder has the mark blanked out. Nothing
+# else in the file changes.
+copy_as_native() {
+  cp "$1" "$2" || return 1
+  if [ "$(/bin/dd if="$2" bs=1 skip=64 count=16 2>/dev/null)" = "Wine builtin DLL" ]; then
+    /bin/dd if=/dev/zero of="$2" bs=1 seek=64 count=16 conv=notrunc 2>/dev/null || return 1
+  fi
+}
+
+# Gives the game, and only the game, DXMT: copies of its DLLs next to the
+# game's program. Steam keeps Wine's own Direct3D, because DXMT cannot draw
+# Steam's windows. A note in the game folder records which files are ours.
+game_dxmt_on() {
+  local dir w b note tag
+  dir="$(game_dir)" || dir=""
+  if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+    echo "The game is not installed in Steam yet. DXMT is added to it on the first launch after it is."
+    return 0
+  fi
+  w="$(cd "$CUR" && pwd -P)"
+  note="$dir/.skywalker-dxmt"
+  tag="$(current_tag)"
+  if [ "$(head -n 1 "$note" 2>/dev/null)" = "build=$tag" ]; then
+    for b in $GAME_DLLS; do [ -f "$dir/$b" ] || tag=""; done
+    [ -n "$tag" ] && return 0
+    tag="$(current_tag)"
+  fi
+  for b in $GAME_DLLS; do
+    [ -f "$w/dxmt-dlls/x86_64-windows/$b" ] || die "This build has no DXMT copy of $b."
+    if [ -f "$dir/$b" ] && ! /usr/bin/grep -qx "$b" "$note" 2>/dev/null; then
+      die "The game folder already has its own $b, which the launcher will not replace."
+    fi
+  done
+  # DXMT's Direct3D 11 is the one that asks for winemetal; Wine's own does not
+  /usr/bin/grep -a -q -i 'winemetal' "$w/dxmt-dlls/x86_64-windows/d3d11.dll" \
+    || die "The saved DXMT files in $w/dxmt-dlls are not DXMT. Install the build again."
+  echo "build=$tag" > "$note"
+  for b in $GAME_DLLS; do
+    copy_as_native "$w/dxmt-dlls/x86_64-windows/$b" "$dir/$b" || die "Could not copy $b into the game folder."
+    echo "$b" >> "$note"
+  done
+  say "DXMT is set up for the game in $dir"
+}
+
+game_dxmt_off() {
+  local dir note b
+  dir="$(game_dir)" || return 0
+  note="$dir/.skywalker-dxmt"
+  [ -f "$note" ] || return 0
+  for b in $GAME_DLLS; do
+    if /usr/bin/grep -qx "$b" "$note"; then rm -f "$dir/$b"; fi
+  done
+  rm -f "$note"
+}
+
+# split: DXMT for the game, Wine's own Direct3D for Steam and everything else
+# dxmt:  DXMT for everything (Steam cannot show its windows)
+# wine:  Wine's own Direct3D for everything
+apply_graphics() {
+  local want="$1" w
+  w="$(cd "$CUR" && pwd -P)"
+  case "$want" in
+    split) set_build_dlls wine; game_dxmt_on ;;
+    wine) set_build_dlls wine; game_dxmt_off ;;
+    dxmt) set_build_dlls dxmt; game_dxmt_off ;;
+  esac
   echo "$want" > "$w/GRAPHICS"
   say "Graphics for $(current_tag): $want"
+}
+
+cmd_graphics() {
+  local want="${1:-}"
+  need_wine
+  case "$want" in
+    split|dxmt|wine) ;;
+    *) echo "Graphics in use: $(graphics_now). Switch with: skywalker.sh graphics split|dxmt|wine"; return 0 ;;
+  esac
+  our_wineserver_running && die "Quit the game and Steam first."
+  apply_graphics "$want"
 }
 
 # ---------------------------------------------------------------- running
@@ -690,7 +780,7 @@ cmd_doctor() {
   if [ -f "$(steam_dir)/steam.exe" ]; then echo "Steam:        installed"; else echo "Steam:        MISSING from the bottle"; fi
   name="$(game_dir_name || true)"
   if [ -n "$name" ]; then echo "Game:         $name"; else echo "Game:         not installed in Steam (ID $APPID)"; fi
-  echo "Graphics:     $(cat "$CUR/GRAPHICS" 2>/dev/null || echo dxmt)"
+  echo "Graphics:     $(graphics_now)"
   echo "Settings:     $(settings_line) hud=$HUD"
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
@@ -764,5 +854,5 @@ case "${1:-run}" in
   windows) cmd_windows ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
