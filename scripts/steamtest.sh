@@ -170,6 +170,9 @@ time_round() {
     echo "round $n: options [$args], graphics process allowed: $gpu, trace: $trace"
     echo "  seconds after the launcher was started: Steam's starter $(gap "$t0" "$boot"), its checks done $(gap "$t0" "$verify"), browser helper asked for $(gap "$t0" "$helper"), first page ready $(gap "$t0" "$ready"), helper restarted $(gap "$t0" "$restart"), sign-in screen $(gap "$t0" "$login")"
     echo "  graphics process starts: $(grep -a -c 'GPU process started' "$STEAM_DIR/logs/webhelper_gpu.txt" 2>/dev/null); sign-in window listed: $(grep -c 'Sign in to Steam' "$dir/windows.txt"); capture: $(wc -c < "$dir/sign-in.png" 2>/dev/null | tr -d ' ') bytes"
+    echo "  helper launches: $(grep -a -c 'webhelper launched' "$STEAM_DIR/logs/webhelper.txt" 2>/dev/null); restarts of its graphics process noted: $(grep -a -c 'GPU process restarts' "$STEAM_DIR/logs/webhelper.txt" 2>/dev/null); Direct3D copies next to the helper: $(find "$STEAM_DIR/bin/cef/" -maxdepth 2 \( -name 'd3d1*.dll' -o -name 'dxgi.dll' \) -exec basename {} \; 2>/dev/null | tr '\n' ' ')"
+    # with +loaddll in the trace: which Direct3D each program loaded, and from where
+    cat "$SKYWALKER_HOME"/logs/steam-*.log 2>/dev/null | grep -a -i -E 'Loaded L"[^"]*(d3d11|dxgi|winemetal|wined3d)\.dll"' | sed -E 's/^[0-9.]*:?[0-9a-f]*:[0-9a-f]*://; s/ at [0-9A-Fa-fx]+//' | sort | uniq -c | sed 's/^/    loaded: /' | head -n 12
   } | tee -a "$OUT/timeline.txt"
   hang_report "round-$n"
   /bin/bash "$L" stop > /dev/null 2>&1 || true

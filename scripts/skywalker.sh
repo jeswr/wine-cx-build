@@ -80,6 +80,12 @@ STEAM_ARGS="-silent -nofriendsui -nochatui"
 # 0 = tell Steam not to try (-cef-disable-gpu), 1 = let it try.
 STEAM_GPU=0
 
+# With "graphics dxmt" or "graphics d3dmetal" every program in the bottle would
+# get that graphics layer, Steam included. Steam's browser part does not get
+# on with either. 1 = Steam's browser part keeps Wine's own Direct3D (copies
+# next to steamwebhelper.exe), so only the game gets the other layer. 0 = off.
+STEAM_OWN_D3D=1
+
 # "graphics d3dmetal" takes Apple's D3DMetal from here: your own copy of the
 # lib folder of Apple's Game Porting Toolkit (lib/external and lib/wine).
 GPTK_DIR="$HOME/Games/gptk"
@@ -126,10 +132,10 @@ load_conf() {
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
-  : "${GAME_ARGS=-skipvideos}" "${WARM_WAIT:=45}"
+  : "${GAME_ARGS=-skipvideos}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=1}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT; do
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -138,7 +144,7 @@ load_conf() {
 }
 
 settings_line() {
-  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX d3dmhook=$D3DMETAL_HOOK"
+  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX d3dmhook=$D3DMETAL_HOOK steamd3d=$STEAM_OWN_D3D"
 }
 
 # ---------------------------------------------------------------- helpers
@@ -252,6 +258,8 @@ wine_env() {
   local ovr="mscoree=;mshtml=;winedbg.exe=d"
   # split graphics: the game's own copies of these (DXMT) come before Wine's
   if [ "$(graphics_now)" = split ]; then ovr="$ovr;d3d11,dxgi,d3d10core=n,b"; fi
+  # the other way round: Steam's browser part has its own copies of Wine's
+  if steam_d3d_wanted; then ovr="$ovr;d3d11,dxgi,d3d10core,d3d12=n,b"; fi
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-$ovr}"
   # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
@@ -298,6 +306,7 @@ prepare_prefix() {
     cp "$src" "$dst"
   fi
   if [ "$(graphics_now)" = split ]; then game_dxmt_on; else game_dxmt_off; fi
+  if steam_d3d_wanted; then steam_d3d_on; else steam_d3d_off; fi
 }
 
 # ---------------------------------------------------------------- saves
@@ -736,6 +745,80 @@ game_dxmt_off() {
     if /usr/bin/grep -qx "$b" "$note"; then rm -f "$dir/$b"; fi
   done
   rm -f "$note"
+}
+
+# ---- Wine's own Direct3D for Steam's browser part
+# With DXMT or D3DMetal as the bottle's graphics layer, Steam's browser part
+# (steamwebhelper.exe, a Chromium) would load it too: DXMT cannot draw its
+# windows, and with D3DMetal its drawing process keeps dying, which costs a
+# restart of the helper on every start. Copies of Wine's own DLLs next to
+# steamwebhelper.exe, without the builtin mark, are what that program then
+# loads; every other program is unaffected.
+STEAM_D3D_DLLS="d3d11.dll dxgi.dll d3d10core.dll d3d12.dll"
+
+steam_d3d_wanted() {
+  [ "$STEAM_OWN_D3D" = 1 ] || return 1
+  case "$(graphics_now)" in dxmt | d3dmetal) ;; *) return 1 ;; esac
+  [ -n "$(steam_helper_dirs)" ]
+}
+
+# the folders that hold a steamwebhelper.exe
+steam_helper_dirs() {
+  local f
+  for f in "$(steam_dir)"/bin/cef/*/steamwebhelper.exe; do
+    if [ -f "$f" ]; then dirname "$f"; fi
+  done
+}
+
+# where Wine's own copy of a DLL is while another layer has its place
+wine_own_dll() {
+  local w="$1" b="$2" f
+  for f in "$w/d3dmetal-saved/x86_64-windows/$b" "$w/orig-dlls/x86_64-windows/$b"; do
+    if [ -f "$f" ]; then echo "$f"; return 0; fi
+  done
+  # never displaced in this mode: the build's own
+  if [ "$(graphics_now)" = dxmt ] && [ "$b" = d3d12.dll ] && [ -f "$w/lib/wine/x86_64-windows/$b" ]; then
+    echo "$w/lib/wine/x86_64-windows/$b"; return 0
+  fi
+  return 1
+}
+
+steam_d3d_on() {
+  local w dir note tag b src ok
+  w="$(cd "$CUR" && pwd -P)"
+  tag="build=$(current_tag) graphics=$(graphics_now)"
+  steam_helper_dirs | while read -r dir; do
+    note="$dir/.skywalker-wined3d"
+    if [ "$(head -n 1 "$note" 2>/dev/null)" = "$tag" ]; then
+      ok=1
+      for b in $(sed 1d "$note"); do [ -f "$dir/$b" ] || ok=0; done
+      [ "$ok" = 1 ] && continue
+    fi
+    for b in $STEAM_D3D_DLLS; do
+      if [ -f "$dir/$b" ] && ! /usr/bin/grep -qx "$b" "$note" 2>/dev/null; then
+        echo "Steam's own folder already has a $b, which the launcher will not replace: $dir"
+        continue 2
+      fi
+    done
+    echo "$tag" > "$note"
+    for b in $STEAM_D3D_DLLS; do
+      src="$(wine_own_dll "$w" "$b")" || continue
+      if copy_as_native "$src" "$dir/$b"; then echo "$b" >> "$note"; fi
+    done
+    say "Steam's browser part keeps Wine's own Direct3D ($(sed 1d "$note" | tr '\n' ' ' | sed 's/ $//') in $dir)"
+  done
+}
+
+steam_d3d_off() {
+  local dir note b
+  steam_helper_dirs | while read -r dir; do
+    note="$dir/.skywalker-wined3d"
+    [ -f "$note" ] || continue
+    for b in $(sed 1d "$note"); do
+      case "$b" in *.dll) rm -f "$dir/$b" ;; esac
+    done
+    rm -f "$note"
+  done
 }
 
 # ---- Apple's D3DMetal

@@ -223,6 +223,48 @@ grep -a -q "winemetal.dll dxmt d3d11" "$GDIR/d3d11.dll" || fail "split after d3d
 grep -q "apple d3d11" "$GL/wine/x86_64-windows/d3d11.dll" || fail "the user's own toolkit folder was changed"
 bash "$S" graphics dxmt
 
+echo "-- Steam's browser part keeps Wine's own Direct3D"
+NOW="$(cd "$SKYWALKER_HOME/wine/current" && pwd -P)"
+CEF="$STEAM/bin/cef/cef.win64"
+bash "$S" wine cmd > "$T/own0.txt"
+if grep -q 'overrides=.*d3d11' "$T/own0.txt"; then fail "the DLL order is changed although Steam has no browser part here"; fi
+mkdir -p "$CEF"
+touch "$CEF/steamwebhelper.exe"
+bash "$S" wine cmd > "$T/own1.txt"
+grep -q 'overrides=.*d3d11,dxgi,d3d10core,d3d12=n,b' "$T/own1.txt" || { cat "$T/own1.txt"; fail "with DXMT for everything, local copies are not looked for first"; }
+bash "$S" steam > "$T/own-steam.txt"
+grep -q "Steam's browser part keeps Wine's own Direct3D" "$T/own-steam.txt" || { cat "$T/own-steam.txt"; fail "nothing was said about Steam's own Direct3D"; }
+for d in d3d11 dxgi d3d10core; do
+  grep -q "wine $d" "$CEF/$d.dll" || fail "Steam's browser part did not get Wine's own $d.dll"
+done
+bash "$S" steam > "$T/own-steam2.txt"
+if grep -q "keeps Wine's own Direct3D" "$T/own-steam2.txt"; then fail "the copies for Steam were made a second time"; fi
+SKY_STEAM_OWN_D3D=0 bash "$S" steam > /dev/null
+[ ! -e "$CEF/d3d11.dll" ] || fail "STEAM_OWN_D3D=0 left the copies in Steam's folder"
+[ ! -e "$CEF/.skywalker-wined3d" ] || fail "STEAM_OWN_D3D=0 left the note in Steam's folder"
+SKY_STEAM_OWN_D3D=0 bash "$S" wine cmd > "$T/own2.txt"
+if grep -q 'overrides=.*d3d11' "$T/own2.txt"; then fail "STEAM_OWN_D3D=0 still changes the DLL order"; fi
+echo "steam's own" > "$CEF/dxgi.dll"
+bash "$S" steam > "$T/own-foreign.txt"
+grep -q "steam's own" "$CEF/dxgi.dll" || fail "a DLL that belongs to Steam was overwritten"
+[ ! -e "$CEF/d3d11.dll" ] || fail "copies were made next to a DLL that belongs to Steam"
+rm -f "$CEF/dxgi.dll"
+# with D3DMetal the copies come from what D3DMetal displaced, Direct3D 12 included
+echo "wine d3d12" > "$NOW/lib/wine/x86_64-windows/d3d12.dll"
+bash "$S" graphics d3dmetal > /dev/null
+bash "$S" steam > /dev/null
+for d in d3d11 dxgi d3d10core d3d12; do
+  grep -q "wine $d" "$CEF/$d.dll" || fail "under d3dmetal Steam's browser part did not get Wine's own $d.dll"
+done
+grep -q "apple d3d11" "$NOW/lib/wine/x86_64-windows/d3d11.dll" || fail "the build lost Apple's d3d11.dll"
+bash "$S" graphics split > /dev/null
+bash "$S" steam > /dev/null
+[ ! -e "$CEF/d3d11.dll" ] || fail "split graphics left the copies in Steam's folder"
+grep -q "wine d3d12" "$NOW/lib/wine/x86_64-windows/d3d12.dll" || fail "Wine's own d3d12.dll did not come back"
+bash "$S" graphics dxmt > /dev/null
+rm -rf "${STEAM:?}/bin" "$NOW/lib/wine/x86_64-windows/d3d12.dll"
+rm -f "$SKYWALKER_HOME/steam-session"
+
 echo "-- wine passthrough"
 bash "$S" wine cmd /c ver > "$T/wine.txt"
 grep -q "fake-wine cmd /c ver prefix=$P user=crossover" "$T/wine.txt" || fail "wine passthrough did not set up the environment"

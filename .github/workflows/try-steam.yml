@@ -22,24 +22,31 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: arm-1
+          # DXMT for everything, as D3DMetal is for everything on a real Mac:
+          # does Steam's browser part work when it keeps Wine's own Direct3D?
+          - name: dxmt-steam-own-d3d
             runner: macos-15
-          - name: arm-2
+            graphics: dxmt
+            own: "1"
+          - name: dxmt-everything
             runner: macos-15
-          - name: arm-3
+            graphics: dxmt
+            own: "0"
+          - name: split
             runner: macos-15
+            graphics: split
+            own: "1"
     env:
       TAG: wine-cx-26.3.0-patched-7
-      GRAPHICS: split
+      GRAPHICS: ${{ matrix.graphics }}
+      SKY_STEAM_OWN_D3D: ${{ matrix.own }}
       TRACE: fixme-all
       FIRST_TRACE: fixme-all
       MINUTES: "2"
       # one start of Steam per line, timed up to the sign-in screen
       ROUNDS: |-
 
-        +trace:+timestamp,+pid,+process,+loaddll,fixme-all
-        -no-cef-sandbox
-        -no-cef-sandbox -nofriendsui -nochatui -cef-disable-breakpad
+        +trace:+pid,+loaddll,fixme-all
     steps:
       - uses: actions/checkout@v4
 
