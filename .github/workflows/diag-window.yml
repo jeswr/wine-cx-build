@@ -1,0 +1,30 @@
+name: Test the window diagnosis script
+
+on:
+  push:
+    branches: [claude/mac-diag]
+    paths: ['scripts/diag-window.sh', '.github/workflows/diag-window.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    env:
+      TAG: wine-cx-26.3.0-5
+      SKYWALKER_HOME: ${{ github.workspace }}/../sky
+      SKYWALKER_APP: ${{ github.workspace }}/../Applications/Skywalker Saga.app
+      SKY_PREFIX: ${{ github.workspace }}/../sky-prefix
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install with the launcher
+        run: /bin/bash scripts/skywalker.sh install "$TAG"
+      - name: Run the diagnosis (zsh, as on the Mac)
+        shell: zsh {0}
+        run: |
+          bash "$PWD/scripts/diag-window.sh" notepad 90
+          cat "$SKYWALKER_HOME"/logs/diag-*/report.txt
+          grep -q 'first on-screen window at: [0-9]' "$SKYWALKER_HOME"/logs/diag-*/report.txt
+          grep -q 'after stop: 0 Wine' "$SKYWALKER_HOME"/logs/diag-*/report.txt
