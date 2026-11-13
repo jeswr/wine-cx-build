@@ -1,0 +1,23 @@
+name: Check the launcher scripts
+
+on:
+  push:
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/scripts.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the launcher checks with the stock macOS bash
+        run: /bin/bash scripts/test-skywalker.sh
+      - name: Lint
+        run: |
+          brew install shellcheck
+          shellcheck -S warning scripts/*.sh

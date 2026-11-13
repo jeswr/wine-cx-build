@@ -1,6 +1,36 @@
 # wine-cx-build
 
-Builds Wine for macOS from CodeWeavers' published CrossOver open-source sources (LGPL) on GitHub's macOS runners, for personal use with DXMT.
+Builds Wine for macOS from CodeWeavers' published CrossOver open-source sources (LGPL) on GitHub's macOS runners, for personal use with DXMT, and provides a launcher for LEGO Star Wars: The Skywalker Saga on an Apple silicon Mac.
 
-Run the "Build CrossOver Wine (macOS)" workflow from the Actions tab. The result is published as a release.
 This repository contains build scripts only; it does not contain CrossOver application code or Apple's D3DMetal.
+
+## What a release contains
+
+- Wine built from the CrossOver sources (version pinned in `sources.lock`), 32-bit and 64-bit Windows parts.
+- DXMT in place of Wine's own Direct3D 10/11. Wine's copies are kept in `orig-dlls/`.
+- `lib/`: the Homebrew builds of FreeType, GnuTLS, SDL2 and MoltenVK with their dependencies. Wine loads these by name at run time, so it must be started with `DYLD_FALLBACK_LIBRARY_PATH=<build>/lib:/usr/lib`.
+- `manifest.env`: the tag, file name and checksum, which the launcher reads.
+
+Run the "Build CrossOver Wine (macOS)" workflow from the Actions tab. A plain build from `main` becomes the latest release. Patched builds, builds from other branches and builds of a newly found CrossOver version are published as pre-releases. A weekly workflow checks for a new CrossOver source version.
+
+## Playing
+
+First time, in Terminal (quit CrossOver and Steam first):
+
+```
+mkdir -p ~/Games/skywalker && curl -fsSL https://raw.githubusercontent.com/jeswr/wine-cx-build/main/scripts/skywalker.sh -o ~/Games/skywalker/skywalker.sh && bash ~/Games/skywalker/skywalker.sh install
+```
+
+This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games/skywalker-cx` (the original is only read) and creates "Skywalker Saga" in `~/Applications`. After that, open the app. Each launch backs up the save files to `~/Games/SkywalkerSaga-saves`, starts Steam and the game, and shuts Wine down when the game exits.
+
+| Command | What it does |
+| --- | --- |
+| `skywalker.sh steam` | Opens Steam's window, to sign in or change settings |
+| `skywalker.sh bench <label>` | Plays with the frame counter on and prints average fps and the slowest 1% afterwards |
+| `skywalker.sh update` / `rollback` | Installs the latest build / returns to the previous one |
+| `skywalker.sh doctor` | Shows what is installed and what is missing |
+| `skywalker.sh stop` | Shuts down Steam and Wine |
+
+Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame counter). `SKY_UPSCALE=1 skywalker.sh bench upscaled` overrides one for a single run.
+
+`scripts/try-on-mac.sh` is the earlier one-off test script and is kept for reference.
