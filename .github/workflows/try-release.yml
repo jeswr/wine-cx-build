@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 40
     env:
       TAG: ${{ inputs.tag || 'wine-cx-26.3.0-patched-6' }}
-      ASSET: ${{ inputs.asset || 'wine-cx-26.3.0.tar.xz' }}
+      ASSET: ${{ inputs.asset || 'wine-cx-26.3.0-patched.tar.xz' }}
     steps:
       - uses: actions/checkout@v4
 
