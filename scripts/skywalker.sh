@@ -72,6 +72,9 @@ STEAM_GPU=0
 # "graphics d3dmetal" takes Apple's D3DMetal from here: your own copy of the
 # lib folder of Apple's Game Porting Toolkit (lib/external and lib/wine).
 GPTK_DIR="$HOME/Games/gptk"
+# 1 = Wine loads Apple's libd3dshared.dylib when it starts, as CrossOver does
+# for D3DMetal. 0 = D3DMetal's files are used without that.
+D3DMETAL_HOOK=1
 
 MSYNC=1                  # CrossOver's fast locks
 UPSCALE=0                # 1 = draw small and let MetalFX enlarge it. Set the game to 1280x800 first.
@@ -105,15 +108,15 @@ load_conf() {
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
-  : "${GPTK_DIR:=$HOME/Games/gptk}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR; do
+  : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=1}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
 }
 
 settings_line() {
-  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX"
+  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX d3dmhook=$D3DMETAL_HOOK"
 }
 
 # ---------------------------------------------------------------- helpers
@@ -225,7 +228,11 @@ wine_env() {
   # Apple's D3DMetal: Wine loads libd3dshared.dylib when it starts and is told
   # which graphics layer is in use, as CrossOver does for its own D3DMetal mode
   if [ "$(graphics_now)" = d3dmetal ]; then
-    export CX_APPLEGPTK_LIBD3DSHARED_PATH="$CUR/lib/external/libd3dshared.dylib"
+    if [ "$D3DMETAL_HOOK" = 1 ]; then
+      export CX_APPLEGPTK_LIBD3DSHARED_PATH="$CUR/lib/external/libd3dshared.dylib"
+    else
+      unset CX_APPLEGPTK_LIBD3DSHARED_PATH
+    fi
     export CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal
     export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:$CUR/lib/external:/usr/lib"
     export DYLD_FALLBACK_FRAMEWORK_PATH="$CUR/lib/external:/Library/Frameworks:/System/Library/Frameworks"
@@ -1015,7 +1022,14 @@ cmd_doctor() {
   name="$(game_dir_name || true)"
   if [ -n "$name" ]; then echo "Game:         $name"; else echo "Game:         not installed in Steam (ID $APPID)"; fi
   echo "Graphics:     $(graphics_now)"
-  if gptk_find > /dev/null; then echo "D3DMetal:     Apple's files found in $GPTK_DIR"; else echo "D3DMetal:     Apple's files not found in $GPTK_DIR (only needed for: graphics d3dmetal)"; fi
+  if name="$(gptk_find)"; then
+    echo "D3DMetal:     Apple's files found in $GPTK_DIR"
+    echo "              Windows side: ${name%%|*}/x86_64-windows ($(ls "${name%%|*}/x86_64-windows" 2>/dev/null | tr '\n' ' '))"
+    echo "              Unix side:    ${name%%|*}/x86_64-unix ($(ls "${name%%|*}/x86_64-unix" 2>/dev/null | tr '\n' ' '))"
+    echo "              Framework:    ${name#*|} ($(ls "${name#*|}" 2>/dev/null | tr '\n' ' '))"
+  else
+    echo "D3DMetal:     Apple's files not found in $GPTK_DIR (only needed for: graphics d3dmetal)"
+  fi
   echo "Settings:     $(settings_line) hud=$HUD"
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi

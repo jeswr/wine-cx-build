@@ -154,6 +154,8 @@ grep -q "Graphics:     d3dmetal" "$T/doctor-d3dm.txt" || fail "doctor does not r
 bash "$S" wine cmd > "$T/wine-d3dm.txt"
 grep -q "d3dshared=$SKYWALKER_HOME/wine/current/lib/external/libd3dshared.dylib backend=d3dmetal" "$T/wine-d3dm.txt" || { cat "$T/wine-d3dm.txt"; fail "Wine is not told about D3DMetal"; }
 if grep -q 'overrides=.*d3d11' "$T/wine-d3dm.txt"; then fail "d3dmetal changes the DLL order"; fi
+SKY_D3DMETAL_HOOK=0 bash "$S" wine cmd > "$T/wine-d3dm0.txt"
+grep -q "d3dshared=none backend=d3dmetal" "$T/wine-d3dm0.txt" || fail "D3DMETAL_HOOK=0 still passes libd3dshared to Wine"
 bash "$S" graphics d3dmetal
 grep -q "wine d3d11" "$W/d3dmetal-saved/x86_64-windows/d3d11.dll" || fail "applying d3dmetal twice lost Wine's own d3d11.dll"
 echo "-- a new build takes over the graphics choice"
