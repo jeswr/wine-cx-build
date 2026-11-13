@@ -72,6 +72,7 @@ BOTTLE_SRC="$HOME/Library/Application Support/CrossOver/Bottles/Steam"
 WINE_USER=crossover      # the Windows user name inside that bottle
 
 APPID=920210             # the game's Steam ID
+GAME_ARGS="-skipvideos"  # options for the game itself: this one skips the logos and the intro film
 STEAM_ARGS="-silent -nofriendsui -nochatui"
 # Steam's windows are drawn by a separate graphics process that cannot start
 # under this Wine. Steam only gives up on it after four failed tries and a
@@ -125,12 +126,15 @@ load_conf() {
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
+  : "${GAME_ARGS=-skipvideos}" "${WARM_WAIT:=45}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES; do
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
+  # an empty SKY_GAME_ARGS means: no options for the game
+  if [ -n "${SKY_GAME_ARGS+set}" ]; then GAME_ARGS="$SKY_GAME_ARGS"; fi
 }
 
 settings_line() {
@@ -195,8 +199,16 @@ steam_gpu_opt() {
 helper_running() {
   /bin/ps -axww -o command= | /usr/bin/grep -i -F 'steamwebhelper.exe' | /usr/bin/grep -v grep >/dev/null
 }
+# Steam itself: a process whose own program is steam.exe. Steam's browser
+# helpers carry "-steampath=...\steam.exe" among their options and can outlive
+# Steam, so the name anywhere on the line is not enough.
 steam_running() {
-  /bin/ps -axww -o command= | /usr/bin/grep -i -F 'steam.exe' | /usr/bin/grep -v grep >/dev/null
+  /bin/ps -axww -o command= | /usr/bin/awk '{
+    l = tolower($0); sub(/^"/, "", l)
+    i = index(l, ".exe"); if (!i) next
+    prog = substr(l, 1, i + 3)
+    if (substr(prog, 1, 1) != "/" && prog ~ /(^|[\\\/])steam\.exe$/) found = 1
+  } END { exit !found }'
 }
 
 # Process ids of everything Wine has running for this user. macOS lists a Wine
@@ -988,6 +1000,17 @@ kill_strays() {
   if [ -n "$pids" ]; then kill -9 $pids 2>/dev/null || true; fi
 }
 
+# Whether Steam fetched a new version of itself since the time given
+# ("2026-11-13 22:00:00"), going by its starter's log.
+steam_updated_since() {
+  local f
+  f="$(steam_dir)/logs/bootstrap_log.txt"
+  [ -f "$f" ] || return 1
+  /usr/bin/awk -v s="[$1]" '
+    substr($0, 1, 1) == "[" && substr($0, 1, 21) >= s && tolower($0) ~ /downloading update|installing update|extracting package/ { found = 1 }
+    END { exit !found }' "$f"
+}
+
 # $1 = log file for Wine's output
 play() {
   local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game=""
@@ -1004,11 +1027,16 @@ play() {
   backup_saves
   display_guard
   wine_env
-  if our_wineserver_running && steam_running; then
-    if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
-      warm=1
-    else
-      say "Steam is open with other settings, so it is restarted."
+  if our_wineserver_running; then
+    if steam_running; then
+      if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
+        warm=1
+      else
+        say "Steam is open with other settings, so it is restarted."
+        shutdown_wine
+      fi
+    elif helper_running; then
+      say "Steam has gone but parts of it were left running. Tidying up before the start."
       shutdown_wine
     fi
   fi
@@ -1016,26 +1044,44 @@ play() {
   cd "$HOME" || true
   if [ "$warm" = 1 ]; then
     say "Steam is still open, so the game starts straight away ($(settings_line))"
-    run_wine "$STEAM_EXE" -applaunch "$APPID" >> "$log" 2>&1 &
-  else
+    # shellcheck disable=SC2086
+    run_wine "$STEAM_EXE" -applaunch "$APPID" $GAME_ARGS >> "$log" 2>&1 &
+    # An open Steam starts the game within seconds. If it does not, it is not
+    # in a state to do so: start again from nothing.
+    for i in $(seq 1 "$WARM_WAIT"); do
+      sleep 1
+      if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
+      steam_running || break
+    done
+    if [ "$started" = 1 ]; then
+      t_steam=open; t_helper=open
+    else
+      say "The open Steam did not start the game, so Steam is started afresh."
+      shutdown_wine
+      warm=0
+    fi
+  fi
+  if [ "$warm" != 1 ]; then
     say "Starting Steam and the game with $(current_tag) ($(settings_line))"
     if bottle_update_due; then note_bottle_update; else notify "Starting the game. This can take a minute." & fi
     session_sig > "$SESSION"
     start_watchdog "$log"
     # shellcheck disable=SC2086,SC2046
-    run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) -applaunch "$APPID" >> "$log" 2>&1 &
-  fi
+    run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) -applaunch "$APPID" $GAME_ARGS >> "$log" 2>&1 &
 
-  # Wait for the game to appear: 10 minutes covers a Steam self-update.
-  # The times of each stage are kept, for "skywalker.sh timeline".
-  for i in $(seq 1 540); do
-    sleep 1
-    if [ -z "$t_steam" ] && steam_running; then t_steam=$(( $(date +%s) - t0 )); fi
-    if [ -z "$t_helper" ] && helper_running; then t_helper=$(( $(date +%s) - t0 )); fi
-    if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
-    if [ "$i" -gt 60 ] && ! our_wineserver_running; then break; fi
-  done
-  if [ "$warm" = 1 ]; then t_steam=open; t_helper=open; fi
+    # Wait for the game to appear: 10 minutes covers a Steam self-update.
+    # The times of each stage are kept, for "skywalker.sh timeline".
+    for i in $(seq 1 540); do
+      sleep 1
+      if [ -z "$t_steam" ] && steam_running; then t_steam=$(( $(date +%s) - t0 )); fi
+      if [ -z "$t_helper" ] && helper_running; then t_helper=$(( $(date +%s) - t0 )); fi
+      if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
+      if [ "$i" = 40 ] && steam_updated_since "$(cat "$LOGS/last-start")"; then
+        say "Steam is downloading an update of itself first. This start takes a few minutes longer."
+      fi
+      if [ "$i" -gt 60 ] && ! our_wineserver_running; then break; fi
+    done
+  fi
   # shellcheck disable=SC2086
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start")" "$(current_tag)" "${t_steam:--}" "${t_helper:--}" "${t_game:--}" "$STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS)" >> "$LOGS/startup.tsv"
   if [ "$started" != 1 ]; then
@@ -1054,6 +1100,7 @@ play() {
     say "The game is running. It started ${t_game}s after the launcher."
   else
     say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
+    if steam_updated_since "$(cat "$LOGS/last-start")"; then say "Steam updated itself during this start, which is why it took longer than usual."; fi
   fi
   while game_running; do sleep 5; done
   say "The game has exited."
@@ -1267,6 +1314,7 @@ cmd_timeline() {
       printf "Seconds until: Steam running %s, Steam browser part running %s, game running %s\n", $3, $4, $5
       printf "Build: %s   Steam options: %s\n", $2, $6 }'
   fi
+  if steam_updated_since "$since"; then echo "Steam downloaded and installed an update of itself during this start; that is extra time a normal start does not have."; fi
   echo "Steam's logs from then on:"
   for f in bootstrap_log.txt steamui_html.txt webhelper.txt connection_log.txt console_log.txt content_log.txt gameprocess_log.txt cloud_log.txt; do
     [ -f "$logs/$f" ] || continue

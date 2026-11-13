@@ -295,6 +295,7 @@ case "$*" in
       echo $! > "$FAKE_DIR/server.pid"
     fi
     case "$*" in *-applaunch*)
+      if [ -f "$FAKE_DIR/deaf" ]; then rm -f "$FAKE_DIR/deaf"; exit 0; fi
       ( sleep 2; exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$FAKE_GAME\\game_dx11.EXE" sleep 4 ) &
       ;;
     esac
@@ -361,6 +362,44 @@ C:\\Program Files (x86)\\Steam\\steam.exe -cef-disable-gpu -foo
 C:\\Program Files (x86)\\Steam\\steam.exe -foo -cef-disable-gpu" ] || { cat "$FAKE_DIR/calls.txt"; fail "the graphics process option was not handled as intended"; }
 bash "$S" stop > /dev/null
 [ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
+
+echo "-- an open Steam that cannot start the game, and leftovers of a Steam that has gone"
+: > "$FAKE_DIR/calls.txt"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > /dev/null
+grep -q -e '-applaunch 920210 -skipvideos$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "the game was not told to skip its films"; }
+: > "$FAKE_DIR/calls.txt"
+SKY_GAME_ARGS="" SKY_KEEP_STEAM_MINUTES=0.5 bash "$S" run > "$T/deaf0.txt"
+grep -q -e '-applaunch 920210$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "an empty GAME_ARGS still passed options to the game"; }
+steam_alive || fail "Steam is gone although it should stay open"
+touch "$FAKE_DIR/deaf"
+SKY_GAME_ARGS="" SKY_WARM_WAIT=3 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/deaf1.txt"
+grep -q 'Steam is still open, so the game starts straight away' "$T/deaf1.txt" || fail "the open Steam was not tried first"
+grep -q 'The open Steam did not start the game, so Steam is started afresh' "$T/deaf1.txt" || { cat "$T/deaf1.txt"; fail "a failed hand-over to the open Steam was not noticed"; }
+grep -q 'The game is running' "$T/deaf1.txt" || fail "the game did not start after falling back to a fresh Steam"
+if steam_alive; then fail "Steam was left open although KEEP_STEAM_MINUTES is 0"; fi
+# Steam has gone, one of its helpers has not: that is not an open Steam
+( exec -a "$W/bin/wineserver" sleep 300 ) &
+orphan_server=$!
+( exec -a 'C:\Program Files (x86)\Steam\bin\cef\cef.win7x64\steamwebhelper.exe -lang=en_US -steampath=C:\Program Files (x86)\Steam\steam.exe -clientui' sleep 300 ) &
+orphan_helper=$!
+sleep 1
+bash "$S" doctor > "$T/orphan-doctor.txt"
+grep -q 'Wine running: yes' "$T/orphan-doctor.txt" || fail "the leftover Wine was not seen"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/orphan1.txt"
+if grep -q 'Steam is still open' "$T/orphan1.txt"; then cat "$T/orphan1.txt"; fail "a leftover helper was taken for an open Steam"; fi
+grep -q 'Steam has gone but parts of it were left running' "$T/orphan1.txt" || { cat "$T/orphan1.txt"; fail "the leftovers of Steam were not tidied up"; }
+grep -q 'The game is running' "$T/orphan1.txt" || fail "the game did not start after the tidy-up"
+if kill -0 "$orphan_helper" 2>/dev/null; then fail "the leftover helper is still running"; fi
+kill "$orphan_server" 2>/dev/null || true
+
+echo "-- Steam updating itself is named"
+since="$(cat "$SKYWALKER_HOME/logs/last-start")"
+echo "[$since] Downloading update (1,024 of 31,823 KB)..." >> "$STEAM/logs/bootstrap_log.txt"
+bash "$S" timeline > "$T/selfupdate.txt"
+grep -q 'Steam downloaded and installed an update of itself during this start' "$T/selfupdate.txt" || fail "timeline does not name Steam's self-update"
+sed -i.bak '$d' "$STEAM/logs/bootstrap_log.txt"
+bash "$S" timeline > "$T/selfupdate2.txt"
+if grep -q 'update of itself' "$T/selfupdate2.txt"; then fail "timeline names a self-update that did not happen"; fi
 
 echo "-- Steam started ahead of the game"
 : > "$FAKE_DIR/calls.txt"
