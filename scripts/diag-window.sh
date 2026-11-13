@@ -89,3 +89,4 @@ sleep 3
 echo
 echo "First window on screen: ${seen:-never}"
 echo "Full report: $REPORT"
+if /usr/bin/pbcopy < "$REPORT" 2>/dev/null; then echo "The report is on your clipboard: paste it into the chat."; fi
