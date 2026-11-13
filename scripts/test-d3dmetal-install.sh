@@ -54,6 +54,11 @@ for d in d3d11 dxgi d3d12 d3d10 atidxx64 nvapi64; do
   ln -s ../../external/libd3dshared.dylib "$WINES/$HAND/lib/wine/x86_64-unix/$d.so"
 done
 ln -sfn "$HAND" "$WINES/current"
+# the bottle has been used by that build, as on the Mac
+t0="$(date +%s)"
+/bin/bash "$SKY" update-bottle > "$OUT/d3dm-bottle-old.txt" 2>&1
+sed 's/^/    /' "$OUT/d3dm-bottle-old.txt"
+echo "    (bottle brought to the hand-made build in $(( $(date +%s) - t0 )) s)"
 /bin/bash "$SKY" doctor > "$OUT/d3dm-doctor-before.txt" 2>&1
 /usr/bin/grep -E 'Build in use|Graphics|D3DMetal' "$OUT/d3dm-doctor-before.txt" | sed 's/^/    /'
 check "before the update the hand-made build is in use" has_line "$OUT/d3dm-doctor-before.txt" "$HAND"
@@ -67,6 +72,11 @@ tail -n 6 "$OUT/d3dm-install-new.txt" | sed 's/^/    /'
 /usr/bin/grep -E 'Build in use|Graphics|D3DMetal|Windows side|Unix side|Framework|Windows DLLs' "$OUT/d3dm-doctor-after.txt" | cut -c1-220 | sed 's/^/    /'
 N="$WINES/$NEW"
 check "the new build is in use" has_line "$OUT/d3dm-doctor-after.txt" "Build in use: $NEW"
+check "install said that it updates the bottle" has_line "$OUT/d3dm-install-new.txt" "Updating the bottle for $NEW"
+check "install finished the bottle update" has_line "$OUT/d3dm-install-new.txt" "The bottle is up to date"
+/usr/bin/grep -F "The bottle is up to date" "$OUT/d3dm-install-new.txt" | sed 's/^/    /'
+check "the bottle carries the new build's mark" test "$(tr -d '[:space:]' < "$SKY_PREFIX/.update-timestamp")" = "$(/usr/bin/stat -f %m "$N/share/wine/wine.inf")"
+if has_line "$OUT/d3dm-doctor-after.txt" "still to be updated"; then bad "doctor says the bottle update is still due"; else ok "doctor sees no bottle update left to do"; fi
 check "doctor says Graphics: d3dmetal" has_line "$OUT/d3dm-doctor-after.txt" "Graphics:     d3dmetal"
 for d in d3d11 dxgi d3d12 d3d10core; do
   check "Apple's $d.dll is in the new build" has_line "$N/lib/wine/x86_64-windows/$d.dll" "stand-in $d"
@@ -87,7 +97,9 @@ echo "== Wine still starts with the files in place (nothing here uses Direct3D)"
 /bin/bash "$SKY" wine cmd /c "echo d3dm-wine-ok" > "$OUT/d3dm-wine.txt" 2> "$OUT/d3dm-wine.err" &
 pid=$!
 t=0
-while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 240 ]; do sleep 5; t=$((t + 5)); done
+while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 240 ]; do sleep 1; t=$((t + 1)); done
+echo "    (the first Wine program after the update took about ${t}s)"
+if [ "$t" -gt 60 ]; then bad "the first start after install still paid for a bottle update"; fi
 if kill -0 "$pid" 2>/dev/null; then bad "Wine did not finish within ${t}s"; kill -9 "$pid" 2>/dev/null; fi
 /bin/bash "$SKY" stop > /dev/null 2>&1 || true
 check "Wine ran a console program" has_line "$OUT/d3dm-wine.txt" "d3dm-wine-ok"
@@ -104,6 +116,7 @@ check "the new build is still on d3dmetal" has_line "$OUT/d3dm-doctor-back.txt" 
 echo "== installing the same build again changes nothing"
 /bin/bash "$SKY" install "$NEW" > "$OUT/d3dm-install-again.txt" 2>&1 || bad "installing $NEW a second time"
 check "still d3dmetal" test "$(cat "$N/GRAPHICS")" = d3dmetal
+if has_line "$OUT/d3dm-install-again.txt" "Updating the bottle"; then bad "the bottle was updated a second time"; else ok "no second bottle update"; fi
 check "Apple's d3d11.dll still in place" has_line "$N/lib/wine/x86_64-windows/d3d11.dll" "stand-in d3d11"
 
 echo "== leaving d3dmetal puts the build back as it was"

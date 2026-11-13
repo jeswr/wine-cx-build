@@ -432,6 +432,76 @@ cmd_display() {
   esac
 }
 
+# ---------------------------------------------------------------- bottle update
+
+# The first time a build starts anything in a bottle, Wine brings the bottle
+# up to that build: it rewrites the Windows files in it, a few thousand of
+# them. That takes minutes on this Mac and shows nothing on screen (the build
+# has Wine's "updating" window switched off). Wine decides by comparing the
+# time of the build's wine.inf with the number in the bottle's
+# .update-timestamp, and so does this.
+bottle_update_due() {
+  local inf="$CUR/share/wine/wine.inf" want have
+  [ -f "$inf" ] && [ -d "$PREFIX/drive_c" ] || return 1
+  if [ "$(uname -s)" = Darwin ]; then want="$(/usr/bin/stat -f %m "$inf" 2>/dev/null)"; else want="$(stat -c %Y "$inf" 2>/dev/null)"; fi
+  [ -n "$want" ] || return 1
+  have="$(head -n 1 "$PREFIX/.update-timestamp" 2>/dev/null | tr -d '[:space:]')"
+  case "$have" in disable*) return 1 ;; esac
+  [ "$want" != "$have" ]
+}
+
+# Said by anything that is about to start Wine while the update is still due.
+note_bottle_update() {
+  bottle_update_due || return 0
+  say "First start with this build: Wine updates the bottle before anything else. That takes a few minutes, once, and shows nothing on screen."
+  notify "First start with this build: allow a few extra minutes, once." &
+}
+
+# Wine's own programs that do the update
+boot_running() {
+  /bin/ps -axww -o command= | /usr/bin/grep -i -E 'wineboot\.exe|rundll32\.exe' | /usr/bin/grep -v grep >/dev/null
+}
+
+# Does the update now, on its own, so that the next start of the game is a
+# normal one. Bounded: after BOTTLE_UPDATE_MAX seconds it is left to that start.
+# Wine itself waits at most 5 minutes for the update and then carries on while
+# the update is still running, so "the program has ended" is not "the update
+# has ended": this also waits for Wine's update programs to go.
+update_bottle() {
+  local pid t=0 t0 max="${SKY_BOTTLE_UPDATE_MAX:-900}" log="$LOGS/bottle-update.log"
+  bottle_update_due || return 0
+  if our_wineserver_running || other_wine_running; then
+    say "The bottle still has to be updated for this build. Wine is running, so that happens at the next start (a few minutes, once)."
+    return 0
+  fi
+  say "Updating the bottle for $(current_tag). This happens once per build and takes a few minutes."
+  mkdir -p "$LOGS"
+  t0="$(date +%s)"
+  wine_env
+  start_watchdog "$log"
+  # any Wine program will do: Wine runs the update before it
+  ( cd "$HOME" 2>/dev/null || true; limit_processes; WINEDEBUG=fixme-all exec "$CUR/bin/wine" cmd /c ver ) > "$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$t" -lt "$max" ]; do sleep 2; t=$((t + 2)); done
+  while boot_running && [ "$t" -lt "$max" ]; do sleep 2; t=$((t + 2)); done
+  if kill -0 "$pid" 2>/dev/null || boot_running; then
+    kill "$pid" 2>/dev/null || true
+    shutdown_wine > /dev/null 2>&1
+    # stopped half-way: without its mark Wine starts the update again next time
+    rm -f "$PREFIX/.update-timestamp"
+    say "The update did not finish in $max seconds and was stopped. The next start of the game does it again from the beginning. See $log"
+    return 0
+  fi
+  shutdown_wine > /dev/null 2>&1
+  if bottle_update_due; then
+    say "Wine did not mark the bottle as updated. The next start of the game will do it. See $log"
+  elif /usr/bin/grep -q 'boot event wait timed out' "$log" 2>/dev/null; then
+    say "The bottle is up to date ($(( $(date +%s) - t0 )) s). The update took longer than the 5 minutes Wine waits for it, which is why a first start can seem stuck."
+  else
+    say "The bottle is up to date ($(( $(date +%s) - t0 )) s)."
+  fi
+}
+
 # ---------------------------------------------------------------- install
 
 manifest_value() { # $1 = file, $2 = key
@@ -549,6 +619,7 @@ cmd_install() {
   fi
   create_app
   adopt_graphics "$prev"
+  update_bottle
   say "Done. Open \"Skywalker Saga\" from your Applications folder, or run: bash $HOME_DIR/skywalker.sh run"
 }
 
@@ -948,7 +1019,7 @@ play() {
     run_wine "$STEAM_EXE" -applaunch "$APPID" >> "$log" 2>&1 &
   else
     say "Starting Steam and the game with $(current_tag) ($(settings_line))"
-    notify "Starting the game. This can take a minute." &
+    if bottle_update_due; then note_bottle_update; else notify "Starting the game. This can take a minute." & fi
     session_sig > "$SESSION"
     start_watchdog "$log"
     # shellcheck disable=SC2086,SC2046
@@ -1019,6 +1090,7 @@ cmd_steam() {
   if our_wineserver_running && steam_running; then
     say "Steam is already open; showing its window."
   else
+    note_bottle_update
     session_sig > "$SESSION"
     start_watchdog "$log"
   fi
@@ -1057,6 +1129,7 @@ cmd_prewarm() {
   cd "$HOME" || true
   log="$LOGS/prewarm.log"
   : > "$log"
+  note_bottle_update
   session_sig > "$SESSION"
   start_watchdog "$log"
   # shellcheck disable=SC2086,SC2046
@@ -1339,6 +1412,7 @@ cmd_doctor() {
   else
     echo "D3DMetal:     Apple's files not found in $GPTK_DIR (only needed for: graphics d3dmetal)"
   fi
+  if bottle_update_due; then echo "Bottle:       still to be updated for this build (the next start does it and takes a few minutes longer, once; or: skywalker.sh update-bottle)"; fi
   echo "Settings:     $(settings_line) hud=$HUD"
   if [ -f "$DISPLAY_KEEP" ]; then echo "Display:      kept ($(tr '\n' ',' < "$DISPLAY_KEEP" | sed 's/,$//; s/,/, /g'))"; else echo "Display:      as the game writes it (display keep holds it)"; fi
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
@@ -1407,6 +1481,7 @@ case "${1:-run}" in
   rollback) cmd_rollback ;;
   graphics) shift; load_conf; cmd_graphics "${1:-}" ;;
   adopt-graphics) shift; load_conf; need_wine; adopt_graphics "${1:-none}" ;;   # used by the tests
+  update-bottle) load_conf; need_wine; update_bottle ;;   # what install does after switching builds
   run) cmd_run ;;
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;

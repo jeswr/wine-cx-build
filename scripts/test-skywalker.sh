@@ -451,4 +451,30 @@ cp "$T/drift.txt" "$CFG"
 bash "$S" display check
 cmp -s "$CFG" "$T/drift.txt" || fail "display off did not stop the reset"
 
+echo "-- the bottle update that Wine does once per build"
+bash "$S" stop > /dev/null
+: > "$FAKE_DIR/calls.txt"
+bash "$S" update-bottle > "$T/upd0.txt"
+[ ! -s "$T/upd0.txt" ] || fail "a bottle update was announced for a build without wine.inf"
+mkdir -p "$W/share/wine"
+echo inf > "$W/share/wine/wine.inf"
+if [ "$(uname -s)" = Darwin ]; then stamp="$(/usr/bin/stat -f %m "$W/share/wine/wine.inf")"; else stamp="$(stat -c %Y "$W/share/wine/wine.inf")"; fi
+echo "$stamp" > "$P/.update-timestamp"
+bash "$S" update-bottle > "$T/upd1.txt"
+[ ! -s "$T/upd1.txt" ] || fail "a bottle update was announced although the bottle matches the build"
+[ ! -s "$FAKE_DIR/calls.txt" ] || fail "Wine was started although the bottle matches the build"
+echo 12345 > "$P/.update-timestamp"
+bash "$S" doctor > "$T/upd-doctor.txt"
+grep -q 'Bottle:       still to be updated for this build' "$T/upd-doctor.txt" || fail "doctor does not say that the bottle update is due"
+bash "$S" update-bottle > "$T/upd2.txt"
+grep -q 'Updating the bottle for fake-1' "$T/upd2.txt" || fail "the bottle update was not announced"
+grep -q -x 'cmd /c ver' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "the bottle update did not start Wine"; }
+grep -q 'Wine did not mark the bottle as updated' "$T/upd2.txt" || fail "an update that did not happen was reported as done"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/upd3.txt"
+grep -q 'First start with this build: Wine updates the bottle' "$T/upd3.txt" || fail "run did not warn about the bottle update"
+echo disable > "$P/.update-timestamp"
+bash "$S" update-bottle > "$T/upd4.txt"
+[ ! -s "$T/upd4.txt" ] || fail "a bottle with updates switched off was updated"
+rm -rf "$W/share" "$P/.update-timestamp"
+
 echo "All launcher checks passed."
