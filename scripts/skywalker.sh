@@ -15,6 +15,7 @@
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
+#   skywalker.sh windows         list the windows Wine has on screen (troubleshooting)
 #   skywalker.sh uninstall       remove the app icon and the launcher's own folder
 #
 # Settings live in ~/Games/skywalker/config.env. For one run, a setting can be
@@ -65,6 +66,10 @@ FPS_CAP=0                # 0 = leave it to the game. Otherwise 60 or 30.
 AVX=0                    # 1 = let Rosetta offer AVX2 to the game
 HUD=0                    # 1 = show Apple's frame counter
 
+# Safety net: Wine may start at most this many processes on top of what is
+# already running. Steam and the game need well under 100.
+PROC_HEADROOM=400
+
 # Kept outside Documents so that macOS does not ask for folder access when the app icon starts the game.
 SAVE_BACKUP_DIR="$HOME/Games/SkywalkerSaga-saves"
 SAVE_BACKUPS=20          # how many different save states to keep
@@ -81,7 +86,8 @@ load_conf() {
   : "${WINE_USER:=crossover}" "${APPID:=920210}" "${STEAM_ARGS:=-silent}"
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS PREFIX; do
+  : "${PROC_HEADROOM:=400}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS PREFIX PROC_HEADROOM; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -141,6 +147,36 @@ game_running() {
 
 steam_running() {
   /bin/ps -axww -o command= | /usr/bin/grep -i -F 'steam.exe' | /usr/bin/grep -v grep >/dev/null
+}
+
+# Process ids of everything Wine has running for this user. macOS lists a Wine
+# program under its Windows path (C:\windows\system32\services.exe), so match
+# those as well as anything started from the launcher's own Wine folder.
+wine_pids() {
+  /bin/ps -x -o pid=,command= | /usr/bin/awk -v w="$WINES/" '{
+    pid = $1; rest = $0; sub(/^ *[0-9]+ +/, "", rest)
+    if (rest ~ /^[A-Za-z]:\\/ || index(rest, w) == 1) print pid
+  }'
+}
+
+# A Wine that goes wrong can start programs in a loop, and with no limit that
+# fills the Mac's process table until nothing else can start. Cap what
+# Wine may reach at "running now + PROC_HEADROOM"; other apps keep the
+# system's limit. Lowering the limit needs no special rights.
+limit_processes() {
+  local now cap cur
+  now="$(/bin/ps -x -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+  cap=$((now + PROC_HEADROOM))
+  cur="$(ulimit -u)"
+  if [ "$cur" = unlimited ] || [ "$cap" -lt "$cur" ]; then
+    ulimit -u "$cap" 2>/dev/null || true
+  fi
+}
+
+# Starts Wine with that limit on Wine alone, so that the launcher can still
+# run its own checks if the limit is ever reached.
+run_wine() {
+  ( limit_processes; exec "$CUR/bin/wine" "$@" )
 }
 
 wine_env() {
@@ -401,12 +437,9 @@ cmd_graphics() {
 
 # ---------------------------------------------------------------- running
 
-# Wine's programs show in ps under their Windows path (C:\windows\...), the
-# Unix side under the build's folder.
-count_wine_procs() {
-  /bin/ps -axww -o command= | /usr/bin/grep -c -E -e '^[A-Za-z]:\\' -e "^$WINES/" 2>/dev/null || true
-}
+count_wine_procs() { wine_pids | /usr/bin/wc -l | /usr/bin/tr -d ' '; }
 
+# The watchdog's way of stopping Wine: everything, at once.
 kill_all_wine() {
   "$CUR/bin/wineserver" -k >/dev/null 2>&1 || true
   sleep 1
@@ -444,12 +477,29 @@ shutdown_wine() {
   local i
   if steam_running; then
     say "Closing Steam"
-    "$CUR/bin/wine" "$STEAM_EXE" -shutdown >/dev/null 2>&1 &
+    run_wine "$STEAM_EXE" -shutdown >/dev/null 2>&1 &
     for i in $(seq 1 20); do steam_running || break; sleep 2; done
   fi
   "$CUR/bin/wineserver" -k >/dev/null 2>&1 || true
   for i in $(seq 1 10); do our_wineserver_running || break; sleep 1; done
-  if [ "$(count_wine_procs)" != 0 ]; then kill_all_wine; fi
+  kill_strays
+}
+
+# Whatever Wine left behind after its server was told to stop (a program stuck
+# before it reached the server, for one). Left alone while CrossOver or another
+# Wine is running, because its programs look the same in the process list.
+kill_strays() {
+  local pids
+  if other_wine_running; then return 0; fi
+  pids="$(wine_pids)"
+  [ -n "$pids" ] || return 0
+  say "Ending leftover Wine processes: $(echo "$pids" | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+  sleep 2
+  pids="$(wine_pids)"
+  # shellcheck disable=SC2086
+  if [ -n "$pids" ]; then kill -9 $pids 2>/dev/null || true; fi
 }
 
 # $1 = log file for Wine's output
@@ -467,9 +517,9 @@ play() {
   say "Starting Steam and the game with $(current_tag) ($(settings_line))"
   notify "Starting the game. This can take a minute."
   cd "$HOME" || true
-  # shellcheck disable=SC2086
   start_watchdog "$log"
-  "$CUR/bin/wine" "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
+  # shellcheck disable=SC2086
+  run_wine "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
 
   # Wait for the game to appear: 10 minutes covers a Steam self-update.
   for i in $(seq 1 200); do
@@ -514,7 +564,7 @@ cmd_steam() {
   cd "$HOME" || true
   local log="$LOGS/steam-$(date +%Y%m%d-%H%M%S).log"
   start_watchdog "$log"
-  "$CUR/bin/wine" "$STEAM_EXE" >> "$log" 2>&1 &
+  run_wine "$STEAM_EXE" >> "$log" 2>&1 &
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
 }
 
@@ -641,8 +691,44 @@ cmd_doctor() {
   echo "Settings:     $(settings_line) hud=$HUD"
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
+  echo "Processes:    $(count_wine_procs) from Wine, $(/bin/ps -x -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ') in all, limit $(ulimit -u) (Wine is held to $PROC_HEADROOM more than are running)"
   if game_running; then echo "Game running: yes"; else echo "Game running: no"; fi
   if other_wine_running; then echo "Other Wine:   CrossOver or another Wine is running"; fi
+}
+
+# Asks the Mac's window server which windows Wine has on screen. This tells
+# "Wine is running but shows nothing" apart from "the window is just hidden
+# behind something". Titles only appear if the terminal may record the screen.
+cmd_windows() {
+  local pids js out
+  load_conf
+  pids="$(wine_pids | /usr/bin/tr '\n' ',')"
+  if [ -z "$pids" ]; then echo "Wine is not running."; return 1; fi
+  mkdir -p "$HOME_DIR/cache"
+  js="$HOME_DIR/cache/windows.js"
+  cat > "$js" <<'EOF'
+function run(argv) {
+  ObjC.import('CoreGraphics');
+  var want = {};
+  argv[0].split(',').forEach(function (p) { if (p) want[p] = true; });
+  var ref = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0);
+  var list = ObjC.deepUnwrap(ObjC.castRefToObject(ref)) || [];
+  var out = [];
+  list.forEach(function (w) {
+    if (!want[String(w.kCGWindowOwnerPID)]) return;
+    var b = w.kCGWindowBounds || {};
+    out.push([w.kCGWindowOwnerPID, Math.round(b.Width) + 'x' + Math.round(b.Height),
+      'layer ' + w.kCGWindowLayer, w.kCGWindowOwnerName || '?', w.kCGWindowName || ''].join('\t'));
+  });
+  return out.join('\n');
+}
+EOF
+  out="$(/usr/bin/osascript -l JavaScript "$js" "$pids")" || { echo "Could not read the window list."; return 2; }
+  if [ -z "$out" ]; then
+    echo "Wine is running ($(count_wine_procs) processes) but has no window on screen."
+    return 1
+  fi
+  echo "$out"
 }
 
 cmd_uninstall() {
@@ -672,7 +758,8 @@ case "${1:-run}" in
   backup) load_conf; backup_saves ;;
   app) load_conf; create_app ;;
   doctor) cmd_doctor ;;
-  wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; exec "$CUR/bin/wine" "$@" ;;
+  windows) cmd_windows ;;
+  wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

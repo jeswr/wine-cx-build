@@ -21,7 +21,7 @@ First time, in Terminal (quit CrossOver and Steam first):
 mkdir -p ~/Games/skywalker && curl -fsSL https://raw.githubusercontent.com/jeswr/wine-cx-build/main/scripts/skywalker.sh -o ~/Games/skywalker/skywalker.sh && bash ~/Games/skywalker/skywalker.sh install
 ```
 
-This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games/skywalker-cx` (the original is only read) and creates "Skywalker Saga" in `~/Applications`. After that, open the app. Each launch backs up the save files to `~/Games/SkywalkerSaga-saves`, starts Steam and the game, and shuts Wine down when the game exits.
+This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games/skywalker-cx` (the original is only read) and creates "Skywalker Saga" in `~/Applications`. After that, open the app. Each launch backs up the save files to `~/Games/SkywalkerSaga-saves`, starts Steam and the game, and shuts Wine down when the game exits. Wine is held to a few hundred processes, so a Wine that goes wrong cannot fill the Mac's process table.
 
 | Command | What it does |
 | --- | --- |
@@ -30,7 +30,8 @@ This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games
 | `skywalker.sh update` / `rollback` | Installs the latest build / returns to the previous one |
 | `skywalker.sh doctor` | Shows what is installed and what is missing |
 | `skywalker.sh wine <args>` | Runs any Wine program with the launcher's settings, for troubleshooting |
-| `skywalker.sh stop` | Shuts down Steam and Wine |
+| `skywalker.sh windows` | Lists the windows Wine has on screen, to tell "nothing is shown" from "hidden behind something" |
+| `skywalker.sh stop` | Shuts down Steam and Wine, and ends any Wine process left behind |
 
 Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame counter). `SKY_UPSCALE=1 skywalker.sh bench upscaled` overrides one for a single run.
 

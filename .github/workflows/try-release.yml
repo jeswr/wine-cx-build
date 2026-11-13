@@ -85,6 +85,39 @@ jobs:
           export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
           /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
           bash scripts/test-guards.sh "$PWD/crash.exe"
+      # "Wine runs but shows nothing" was the fault on the Mac, so check that
+      # a window really reaches the screen, and keep a picture of it.
+      - name: Open a Wine window and look for it on screen
+        run: |
+          if [ ! -x "$RUNNER_TEMP/sky/skywalker.sh" ]; then
+            echo "The launcher was not installed; skipping."
+            exit 0
+          fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          mkdir -p selftest-logs
+          L="$SKYWALKER_HOME/skywalker.sh"
+          WINEDEBUG=fixme-all /bin/bash "$L" wine notepad > selftest-logs/notepad.log 2>&1 &
+          found=0
+          t=0
+          while [ "$t" -lt 120 ]; do
+            sleep 5; t=$((t + 5))
+            if /bin/bash "$L" windows > selftest-logs/windows.txt 2>&1; then
+              # a real window, not a 1x1 helper
+              if awk -F '\t' '{ split($2, d, "x"); if (d[1] >= 200 && d[2] >= 100) ok = 1 } END { exit !ok }' selftest-logs/windows.txt; then
+                found=1; break
+              fi
+            fi
+          done
+          echo "After ${t}s:"; cat selftest-logs/windows.txt
+          sleep 3
+          screencapture -x selftest-logs/screen.png || echo "screencapture failed"
+          /bin/bash "$L" doctor | grep -E 'Processes|Wine running'
+          /bin/bash "$L" stop
+          /bin/bash "$L" doctor | grep -E 'Processes|Wine running'
+          tail -n 20 selftest-logs/notepad.log || true
+          if [ "$found" != 1 ]; then echo "No Wine window appeared on screen."; exit 1; fi
+          if /bin/bash "$L" doctor | grep -q 'Processes:    0 from Wine'; then :; else echo "stop left Wine processes behind"; exit 1; fi
 
       - name: Upload the logs
         if: always()

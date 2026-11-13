@@ -72,7 +72,7 @@ for arch in x86_64-windows i386-windows; do
   echo wine > "$W/orig-dlls/$arch/d3d11.dll"
 done
 mkdir -p "$W/bin"
-printf '#!/bin/sh\necho "fake-wine $* prefix=$WINEPREFIX user=$USER"\nexit 0\n' > "$W/bin/wine"
+printf '#!/bin/bash\necho "fake-wine $* prefix=$WINEPREFIX user=$USER"\necho "limit=$(ulimit -u)"\nexit 0\n' > "$W/bin/wine"
 chmod +x "$W/bin/wine"
 ln -sfn fake-1 "$SKYWALKER_HOME/wine/current"
 bash "$S" graphics wine
@@ -85,6 +85,31 @@ grep -q "Graphics:     dxmt" "$T/doctor2.txt" || fail "doctor does not report th
 echo "-- wine passthrough"
 bash "$S" wine cmd /c ver > "$T/wine.txt"
 grep -q "fake-wine cmd /c ver prefix=$P user=crossover" "$T/wine.txt" || fail "wine passthrough did not set up the environment"
+
+echo "-- process limit"
+before="$(ps -x -o pid= | wc -l | tr -d ' ')"
+SKY_PROC_HEADROOM=50 bash "$S" wine cmd /c ver > "$T/wine-limit.txt"
+limit="$(sed -n 's/^limit=//p' "$T/wine-limit.txt")"
+case "$limit" in ''|*[!0-9]*) fail "Wine was started without a process limit (got '$limit')" ;; esac
+[ "$limit" -ge "$before" ] || fail "process limit $limit is below the $before processes already running"
+[ "$limit" -le $((before + 150)) ] || fail "process limit $limit is not close to $before + 50"
+
+echo "-- leftover Wine processes"
+( exec -a 'C:\windows\system32\stuck.exe' sleep 60 ) &
+stray=$!
+( exec -a '/Applications/CrossOver.app/Contents/MacOS/CrossOver' sleep 60 ) &
+other=$!
+sleep 1
+grep -q "Processes:    0 from Wine" "$T/doctor2.txt" || { kill "$stray" "$other"; fail "doctor counts Wine processes when there are none"; }
+bash "$S" doctor > "$T/doctor3.txt"
+grep -q "Processes:    1 from Wine" "$T/doctor3.txt" || { kill "$stray" "$other"; fail "doctor does not count the leftover Wine process"; }
+bash "$S" stop
+kill -0 "$stray" 2>/dev/null || { kill "$other"; fail "stop ended a Wine process while CrossOver was running"; }
+kill "$other"
+wait "$other" 2>/dev/null || true
+bash "$S" stop
+sleep 1
+if kill -0 "$stray" 2>/dev/null; then kill "$stray"; fail "stop left a stuck Wine process behind"; fi
 
 echo "-- frame summary"
 : > "$T/wine.log"
