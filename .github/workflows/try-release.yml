@@ -13,6 +13,7 @@ on:
       - 'scripts/skywalker.sh'
       - 'scripts/test-guards.sh'
       - 'scripts/test-split.sh'
+      - 'scripts/test-d3dmetal-install.sh'
       - 'scripts/d3dtest.c'
   workflow_dispatch:
     inputs:
@@ -131,6 +132,19 @@ jobs:
           export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
           /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
           bash scripts/test-split.sh "$PWD/d3dtest.exe"
+
+      # Apple's D3DMetal cannot be used on the runner, so stand-in files with the
+      # same names and layout take its place: this is a dry run of the launcher's
+      # file handling for "graphics d3dmetal" and of the update that keeps it.
+      - name: D3DMetal mode and the update that keeps it (stand-in files)
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          if [ "$TAG" = wine-cx-26.3.0-patched-6 ]; then echo "The dry run updates from patched-6, so it needs another tag."; exit 0; fi
+          /bin/bash "$RUNNER_TEMP/sky/skywalker.sh" stop || true
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky-d3dm" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker D3DMetal.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix" SKY_GPTK_DIR="$RUNNER_TEMP/gptk"
+          /bin/bash scripts/test-d3dmetal-install.sh "$TAG"
+
       - name: Upload the logs
         if: always()
         uses: actions/upload-artifact@v4
