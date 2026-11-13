@@ -165,29 +165,43 @@ while [ "$sec" -lt 130 ]; do
   sec=$((sec + 1))
 done
 bash "$S" summary "$T/wine.log" "$T/sys.log" | tee "$T/summary.txt"
-grep -q 'source=game.exe\[4242:1a2b\]' "$T/summary.txt" || fail "summary picked the wrong process"
+grep -q 'source=game.exe\[4242\]' "$T/summary.txt" || fail "summary picked the wrong process"
 grep -q 'frames=7800 seconds=130 avg_fps=60.0 low1_fps=17.9 avg_gpu_ms=8.00' "$T/summary.txt" || fail "summary numbers are wrong"
 grep -q 'minute  1:  60.0 fps, slowest 1%  17.9 fps' "$T/summary.txt" || fail "per-minute numbers are wrong"
 if bash "$S" summary /dev/null >/dev/null; then fail "empty log should not summarise"; fi
 
 echo "-- start-up stopwatch and timeline"
-# A stand-in Wine that "starts" Steam and, two seconds later, the game.
+# A stand-in Wine: "steam.exe ... -applaunch" starts Steam (unless it is open)
+# and, two seconds later, the game, which plays for four seconds.
 cat > "$W/bin/wine" <<'FAKE'
 #!/bin/bash
+echo "$*" >> "$FAKE_DIR/calls.txt"
 case "$*" in
+  *-shutdown*)
+    kill "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" "$(cat "$FAKE_DIR/server.pid" 2>/dev/null)" 2>/dev/null
+    rm -f "$FAKE_DIR/steam.pid" "$FAKE_DIR/server.pid"
+    ;;
   *-applaunch*)
-    ( exec -a 'C:\Program Files (x86)\Steam\steam.exe' sleep 9 ) &
+    if ! kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; then
+      ( exec -a 'C:\Program Files (x86)\Steam\steam.exe' sleep 300 ) &
+      echo $! > "$FAKE_DIR/steam.pid"
+      ( exec -a "$(dirname "$0")/wineserver" sleep 300 ) &
+      echo $! > "$FAKE_DIR/server.pid"
+    fi
     ( sleep 2; exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$FAKE_GAME\\game_dx11.EXE" sleep 4 ) &
     ;;
 esac
 exit 0
 FAKE
-export FAKE_GAME="$GAME"
+export FAKE_GAME="$GAME" FAKE_DIR="$T/fake"
+mkdir -p "$FAKE_DIR"
+steam_alive() { kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; }
 if bash "$S" timeline > /dev/null 2>&1; then fail "timeline should say that no start was recorded"; fi
-SKY_STEAM_ARGS="-silent -testflag" bash "$S" run | tee "$T/run.txt"
+SKY_KEEP_STEAM_MINUTES=0 SKY_STEAM_ARGS="-silent -testflag" bash "$S" run | tee "$T/run.txt"
 grep -q 'The game is running. It started [0-9]*s after the launcher' "$T/run.txt" || fail "run did not report the start-up time"
 grep -q 'The game has exited' "$T/run.txt" || fail "run did not notice the game ending"
 [ "$(wc -l < "$SKYWALKER_HOME/logs/startup.tsv" | tr -d ' ')" = 1 ] || fail "start-up time was not recorded"
+if steam_alive; then fail "Steam was left open although KEEP_STEAM_MINUTES is 0"; fi
 since="$(cat "$SKYWALKER_HOME/logs/last-start")"
 mkdir -p "$STEAM/logs"
 {
@@ -204,5 +218,29 @@ grep -q 'bootstrap_log: Verification complete' "$T/timeline.txt" || fail "timeli
 grep -q 'webhelper: Applying workarounds due to GPU process restarts' "$T/timeline.txt" || fail "timeline misses the graphics process restarts"
 grep -q 'content_log: AppID 920210 state changed' "$T/timeline.txt" || fail "timeline misses the game's lines"
 if grep -q 'long ago\|1 of 2 KB' "$T/timeline.txt"; then fail "timeline shows lines it should leave out"; fi
+
+echo "-- Steam stays open between games"
+: > "$FAKE_DIR/calls.txt"
+SKY_KEEP_STEAM_MINUTES=0.2 bash "$S" run | tee "$T/keep1.txt"
+grep -q 'Steam stays open for 0.2 minutes' "$T/keep1.txt" || fail "Steam was not kept open"
+steam_alive || fail "Steam is gone although it should stay open"
+SKY_KEEP_STEAM_MINUTES=0.2 bash "$S" run | tee "$T/keep2.txt"
+grep -q 'Steam is still open, so the game starts straight away' "$T/keep2.txt" || fail "the open Steam was not reused"
+[ "$(grep -c -e '-applaunch 920210' "$FAKE_DIR/calls.txt")" = 2 ] || fail "expected two game launches"
+[ "$(grep -c -e '-silent' "$FAKE_DIR/calls.txt")" = 1 ] || fail "Steam was started twice"
+if grep -q -e '-shutdown' "$FAKE_DIR/calls.txt"; then fail "Steam was closed between the two games"; fi
+# other settings: the open Steam cannot pass them on, so it has to be restarted
+SKY_KEEP_STEAM_MINUTES=0.2 SKY_FPS_CAP=30 bash "$S" run | tee "$T/keep3.txt"
+grep -q 'Steam is open with other settings, so it is restarted' "$T/keep3.txt" || fail "changed settings did not restart Steam"
+steam_alive || fail "Steam is gone right after the third game"
+sleep 16
+if steam_alive; then fail "the idle timer did not close Steam"; fi
+[ ! -f "$SKYWALKER_HOME/steam-session" ] || fail "the session note was left behind"
+# stop cancels a pending timer and closes Steam at once
+SKY_KEEP_STEAM_MINUTES=5 bash "$S" run > "$T/keep4.txt"
+steam_alive || fail "Steam is gone although it should stay open for 5 minutes"
+bash "$S" stop
+if steam_alive; then fail "stop left Steam open"; fi
+[ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
 
 echo "All launcher checks passed."

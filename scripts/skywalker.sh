@@ -69,6 +69,10 @@ FPS_CAP=0                # 0 = leave it to the game. Otherwise 60 or 30.
 AVX=0                    # 1 = let Rosetta offer AVX2 to the game
 HUD=0                    # 1 = show Apple's frame counter
 
+# Steam stays open this many minutes after the game ends, so that the next
+# start skips Steam's own slow start. 0 = close Steam with the game.
+KEEP_STEAM_MINUTES=30
+
 # Safety net: Wine may start at most this many processes on top of what is
 # already running. Steam and the game need well under 100.
 PROC_HEADROOM=400
@@ -89,8 +93,8 @@ load_conf() {
   : "${WINE_USER:=crossover}" "${APPID:=920210}" "${STEAM_ARGS:=-silent}"
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
-  : "${PROC_HEADROOM:=400}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS PREFIX PROC_HEADROOM; do
+  : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -568,8 +572,36 @@ start_watchdog() {
   ) </dev/null >/dev/null 2>&1 &
 }
 
+# A game started by a Steam that is already open gets that Steam's settings,
+# not the ones of this run. SESSION records what the open Steam was started
+# with, so that a start with other settings restarts Steam first.
+SESSION="$HOME_DIR/steam-session"
+IDLE="$HOME_DIR/steam-idle"
+session_sig() {
+  echo "$(current_tag) $(settings_line) hud=$HUD hudlog=${MTL_HUD_LOG_ENABLED:-0} debug=${WINEDEBUG:-}"
+}
+keep_seconds() {
+  /usr/bin/awk -v m="${KEEP_STEAM_MINUTES:-0}" 'BEGIN { printf "%d", m * 60 }'
+}
+# Closes Steam once it has sat unused for the time given. Any later start or
+# stop replaces the ticket in $IDLE, and a timer with an old ticket does nothing.
+start_idle_timer() {
+  local secs="$1" ticket
+  ticket="$(date +%s)-$$-$RANDOM"
+  echo "$ticket" > "$IDLE"
+  (
+    trap '' HUP
+    sleep "$secs"
+    [ "$(cat "$IDLE" 2>/dev/null)" = "$ticket" ] || exit 0
+    game_running && exit 0
+    rm -f "$IDLE"
+    shutdown_wine
+  ) </dev/null >/dev/null 2>&1 &
+}
+
 shutdown_wine() {
   local i
+  rm -f "$SESSION" "$IDLE"
   if steam_running; then
     say "Closing Steam"
     run_wine "$STEAM_EXE" -shutdown >/dev/null 2>&1 &
@@ -599,7 +631,7 @@ kill_strays() {
 
 # $1 = log file for Wine's output
 play() {
-  local log="$1" i started=0 t0 t_steam="" t_helper="" t_game=""
+  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game=""
   need_wine
   other_wine_running && die "CrossOver or another Wine is running. Quit it first."
   if game_running; then
@@ -609,15 +641,30 @@ play() {
   mkdir -p "$LOGS"
   t0="$(date +%s)"
   date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
+  rm -f "$IDLE"
   backup_saves
-  prepare_prefix
   wine_env
-  say "Starting Steam and the game with $(current_tag) ($(settings_line))"
-  notify "Starting the game. This can take a minute." &
+  if our_wineserver_running && steam_running; then
+    if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
+      warm=1
+    else
+      say "Steam is open with other settings, so it is restarted."
+      shutdown_wine
+    fi
+  fi
+  prepare_prefix
   cd "$HOME" || true
-  start_watchdog "$log"
-  # shellcheck disable=SC2086
-  run_wine "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
+  if [ "$warm" = 1 ]; then
+    say "Steam is still open, so the game starts straight away ($(settings_line))"
+    run_wine "$STEAM_EXE" -applaunch "$APPID" >> "$log" 2>&1 &
+  else
+    say "Starting Steam and the game with $(current_tag) ($(settings_line))"
+    notify "Starting the game. This can take a minute." &
+    session_sig > "$SESSION"
+    start_watchdog "$log"
+    # shellcheck disable=SC2086
+    run_wine "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
+  fi
 
   # Wait for the game to appear: 10 minutes covers a Steam self-update.
   # The times of each stage are kept, for "skywalker.sh timeline".
@@ -628,6 +675,7 @@ play() {
     if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
     if [ "$i" -gt 60 ] && ! our_wineserver_running; then break; fi
   done
+  if [ "$warm" = 1 ]; then t_steam=open; t_helper=open; fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start")" "$(current_tag)" "${t_steam:--}" "${t_helper:--}" "${t_game:--}" "$STEAM_ARGS" >> "$LOGS/startup.tsv"
   if [ "$started" != 1 ]; then
     if our_wineserver_running; then
@@ -641,9 +689,20 @@ play() {
     return 1
   fi
 
-  say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
+  if [ "$warm" = 1 ]; then
+    say "The game is running. It started ${t_game}s after the launcher."
+  else
+    say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
+  fi
   while game_running; do sleep 5; done
   say "The game has exited."
+  keep="$(keep_seconds)"
+  if [ "$keep" -gt 0 ] && steam_running; then
+    backup_saves
+    start_idle_timer "$keep"
+    say "Steam stays open for $KEEP_STEAM_MINUTES minutes so that the next start is quick. To close it now: bash $HOME_DIR/skywalker.sh stop"
+    return 0
+  fi
   sleep 10   # give Steam a moment to upload the saves to Steam Cloud
   shutdown_wine
   backup_saves
@@ -666,7 +725,13 @@ cmd_steam() {
   cd "$HOME" || true
   local log
   log="$LOGS/steam-$(date +%Y%m%d-%H%M%S).log"
-  start_watchdog "$log"
+  rm -f "$IDLE"
+  if our_wineserver_running && steam_running; then
+    say "Steam is already open; showing its window."
+  else
+    session_sig > "$SESSION"
+    start_watchdog "$log"
+  fi
   if [ "$#" -gt 0 ]; then say "Extra Steam options: $*"; fi
   run_wine "$STEAM_EXE" "$@" >> "$log" 2>&1 &
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
@@ -715,14 +780,18 @@ summarise() {
   all="$(mktemp "${TMPDIR:-/tmp}/skywalker-frames.XXXXXX")"
   frames="$all.best"
   # One line per frame: <source> <interval ms> <gpu ms>. The source is the process
-  # that logged it (system log) or "output" (the game's own output), because
+  # that logged it or "output" (lines without a process name), because
   # Steam's windows can log frames too.
   cat "$@" 2>/dev/null | awk '
     {
       i = index($0, "metal-HUD:")
       if (!i) next
       key = "output"
-      if (match(substr($0, 1, i), /[^ ]+\[[0-9]+:[0-9a-fA-Fx]+\]/)) key = substr($0, RSTART, RLENGTH)
+      if (match(substr($0, 1, i), /[^ ]+\[[0-9]+:[0-9a-fA-Fx]+\]/)) {
+        # name[process:thread]: the thread is dropped, a game draws from several
+        key = substr($0, RSTART, RLENGTH)
+        sub(/:[0-9a-fA-Fx]+\]$/, "]", key)
+      }
       s = substr($0, i + 10)
       gsub(/[ \t\r]/, "", s)
       n = split(s, f, ",")
