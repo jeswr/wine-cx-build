@@ -5,7 +5,8 @@
 #   skywalker.sh install [tag]   download a build (latest, or the given release tag),
 #                                copy the CrossOver Steam bottle once, create the app icon
 #   skywalker.sh run             back up saves, start Steam and the game, tidy up on exit
-#   skywalker.sh steam           open Steam's window (to sign in or change settings)
+#   skywalker.sh steam [options] open Steam's window (to sign in or change settings); extra
+#                                options go to Steam, for example -cef-disable-gpu
 #   skywalker.sh bench [label]   like run, with the frame counter on and a summary afterwards
 #   skywalker.sh summary <log>   summarise a frame log again
 #   skywalker.sh backup          back up the save files now
@@ -565,7 +566,8 @@ cmd_steam() {
   local log
   log="$LOGS/steam-$(date +%Y%m%d-%H%M%S).log"
   start_watchdog "$log"
-  run_wine "$STEAM_EXE" >> "$log" 2>&1 &
+  if [ "$#" -gt 0 ]; then say "Extra Steam options: $*"; fi
+  run_wine "$STEAM_EXE" "$@" >> "$log" 2>&1 &
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
 }
 
@@ -752,7 +754,7 @@ case "${1:-run}" in
   rollback) cmd_rollback ;;
   graphics) shift; load_conf; cmd_graphics "${1:-}" ;;
   run) cmd_run ;;
-  steam) cmd_steam ;;
+  steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
   bench) shift; cmd_bench "${1:-test}" ;;
   summary) shift; summarise "$@" ;;
@@ -762,5 +764,5 @@ case "${1:-run}" in
   windows) cmd_windows ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

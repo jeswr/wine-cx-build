@@ -25,7 +25,7 @@ This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games
 
 | Command | What it does |
 | --- | --- |
-| `skywalker.sh steam` | Opens Steam's window, to sign in or change settings |
+| `skywalker.sh steam [options]` | Opens Steam's window, to sign in or change settings. Extra options go to Steam, for example `-cef-disable-gpu` |
 | `skywalker.sh bench <label>` | Plays with the frame counter on and prints average fps and the slowest 1% afterwards |
 | `skywalker.sh update` / `rollback` | Installs the latest build / returns to the previous one |
 | `skywalker.sh doctor` | Shows what is installed and what is missing |
