@@ -54,7 +54,7 @@ resolve() {
 
 # $1 = source file, $2 = file name to install it under
 bundle() {
-  local src="$1" name="$2" dst="$LIB/$2" srcdir dep depbase deppath
+  local src="$1" name="$2" dst="$LIB/$2" srcdir dep depbase deppath self
   if [ -e "$dst" ]; then return 0; fi
   if [ ! -e "$src" ]; then
     echo "bundle-dylibs: $src does not exist" >&2
@@ -65,11 +65,12 @@ bundle() {
   chmod 644 "$dst"
   install_name_tool -id "@rpath/$name" "$dst"
   srcdir="$(cd "$(dirname "$src")" && pwd -P)"
+  # a library lists its own id first, sometimes under another name (libSDL3.0 for libSDL3)
+  self="$(otool -D "$src" | tail -n +2 | head -n 1)"
   otool -L "$src" | tail -n +2 | awk '{print $1}' | while read -r dep; do
     if is_system "$dep"; then continue; fi
     depbase="$(basename "$dep")"
-    # the first entry of a dylib is its own id
-    if [ "$depbase" = "$name" ] || [ "$depbase" = "$(basename "$src")" ]; then continue; fi
+    if [ "$dep" = "$self" ] || [ "$depbase" = "$name" ] || [ "$depbase" = "$(basename "$src")" ]; then continue; fi
     deppath="$(resolve "$dep" "$srcdir")"
     install_name_tool -change "$dep" "@loader_path/$depbase" "$dst"
     bundle "$deppath" "$depbase"
