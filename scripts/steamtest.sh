@@ -62,6 +62,25 @@ fi
 /bin/bash "$L" graphics "$GRAPHICS" || exit 1
 /bin/bash "$L" doctor | grep -E 'Steam|Graphics|Processes'
 
+helpers() { /bin/ps -axww -o command= | grep -c -i '[s]teamwebhelper.exe' || true; }
+
+# The installer leaves only a small starter, which downloads the real Steam on
+# its first run and then restarts itself. That restart sometimes hangs, so the
+# first run is only for the download, with a deadline, and is then shut down.
+note "first start: letting Steam download its update"
+WINEDEBUG=fixme-all /bin/bash "$L" steam > /dev/null 2>&1
+t=0
+while [ "$t" -lt 420 ]; do
+  sleep 5; t=$((t + 5))
+  if [ "$(helpers)" -gt 0 ]; then break; fi
+  if grep -q 'Update complete' "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null; then sleep 15; break; fi
+done
+note "update phase over after ${t}s: $(tail -n 1 "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null | cut -c1-120)"
+/bin/bash "$L" stop > /dev/null 2>&1 || true
+mkdir -p "$OUT/first-start"
+mv "$SKYWALKER_HOME"/logs/steam-*.log "$OUT/first-start/" 2>/dev/null || true
+rm -f "$STEAM_DIR"/logs/cef_log.txt "$STEAM_DIR"/logs/webhelper*.txt
+
 note "starting Steam"
 WINEDEBUG="$TRACE" /bin/bash "$L" steam "$@"
 
@@ -74,10 +93,17 @@ while [ "$(date +%s)" -lt "$end" ]; do
   {
     echo "== $(date +%H:%M:%S)"
     /bin/bash "$L" windows 2>&1
-  } >> "$OUT/windows.log"
+  } > "$OUT/windows-now.txt"
+  cat "$OUT/windows-now.txt" >> "$OUT/windows.log"
   if [ $((tick % 2)) = 0 ] && [ "$shot" -lt 30 ]; then
     shot=$((shot + 1))
-    screencapture -x "$OUT/screen-$(printf '%02d' "$shot").png" 2>/dev/null || true
+    n="$(printf '%02d' "$shot")"
+    screencapture -x "$OUT/screen-$n.png" 2>/dev/null || true
+    # each Wine window on its own, with its transparency kept, so that a
+    # see-through window can be told from a black one
+    sed -n 's/.*[[:space:]]id \([0-9][0-9]*\)$/\1/p' "$OUT/windows-now.txt" | head -n 4 | while read -r id; do
+      screencapture -x -o -l "$id" "$OUT/window-$n-$id.png" 2>/dev/null || true
+    done
   fi
   if [ $((tick % 3)) = 0 ]; then
     {
@@ -87,6 +113,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
     note "$(tail -n 4 "$OUT/windows.log" | tr '\n' ' ' | cut -c1-300)"
   fi
 done
+rm -f "$OUT/windows-now.txt"
 
 note "last window list:"
 tail -n 12 "$OUT/windows.log"
@@ -105,7 +132,13 @@ done
 for f in "$SKYWALKER_HOME"/logs/*; do
   [ -f "$f" ] || continue
   if [ "$(wc -c < "$f")" -gt 6000000 ]; then
-    { head -c 3000000 "$f"; printf '\n[... cut ...]\n'; tail -c 3000000 "$f"; } > "$OUT/launcher/$(basename "$f")"
+    # a trace run: keep the lines about window surfaces and transparency, a
+    # count of every traced function, and the whole log compressed
+    grep -a -E 'shm|Flushing|ayered|alpha|dummy|CreateWindowEx|err:' "$f" > "$OUT/launcher/filtered.tmp" || true
+    { head -n 8000 "$OUT/launcher/filtered.tmp"; echo '[... cut ...]'; tail -n 4000 "$OUT/launcher/filtered.tmp"; } > "$OUT/launcher/$(basename "$f").filtered.txt"
+    rm -f "$OUT/launcher/filtered.tmp"
+    grep -a -o -E '(trace|warn|err|fixme):[a-z_0-9]+:[A-Za-z_0-9]+' "$f" | sort | uniq -c | sort -rn | head -n 150 > "$OUT/launcher/$(basename "$f").functions.txt"
+    if [ "$(wc -c < "$f")" -lt 1500000000 ]; then gzip -1 -c "$f" > "$OUT/launcher/$(basename "$f").gz"; fi
   else
     cp "$f" "$OUT/launcher/"
   fi

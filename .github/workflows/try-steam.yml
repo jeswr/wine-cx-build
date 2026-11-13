@@ -22,28 +22,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: intel-wine
-            runner: macos-15-intel
+          - name: arm-trace
+            runner: macos-15
             graphics: wine
             args: ""
-          - name: intel-wine-nogpu
-            runner: macos-15-intel
+            trace: "fixme-all,+win,+macdrv"
+          - name: arm-inproc
+            runner: macos-15
+            graphics: wine
+            args: "-cef-in-process-gpu"
+            trace: fixme-all
+          - name: arm-single
+            runner: macos-15
+            graphics: wine
+            args: "-cef-single-process"
+            trace: fixme-all
+          - name: arm-nogpu
+            runner: macos-15
             graphics: wine
             args: "-cef-disable-gpu"
-          - name: arm-wine
-            runner: macos-15
-            graphics: wine
-            args: ""
-          - name: arm-dxmt
-            runner: macos-15
-            graphics: dxmt
-            args: ""
+            trace: fixme-all
     env:
       TAG: wine-cx-26.3.0-5
       GRAPHICS: ${{ matrix.graphics }}
       STEAM_OPTIONS: ${{ matrix.args }}
-      TRACE: fixme-all
-      MINUTES: "9"
+      TRACE: ${{ matrix.trace }}
+      MINUTES: "5"
     steps:
       - uses: actions/checkout@v4
 

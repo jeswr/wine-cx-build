@@ -812,7 +812,8 @@ function run(argv) {
     var b = w.kCGWindowBounds || {};
     out.push([w.kCGWindowOwnerPID, Math.round(b.Width) + 'x' + Math.round(b.Height),
       'layer ' + w.kCGWindowLayer, w.kCGWindowOwnerName || '?', w.kCGWindowName || '',
-      'at ' + Math.round(b.X) + ',' + Math.round(b.Y), 'alpha ' + w.kCGWindowAlpha].join('\t'));
+      'at ' + Math.round(b.X) + ',' + Math.round(b.Y), 'alpha ' + w.kCGWindowAlpha,
+      'id ' + w.kCGWindowNumber].join('\t'));
   });
   return out.join('\n');
 }
