@@ -58,7 +58,7 @@ jobs:
           echo "$RUNNER_TEMP/ccbin" >> "$GITHUB_PATH"
 
       - name: Restore the compile cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .ccache
           key: ccache-${{ env.CX_VERSION }}-${{ github.run_id }}
@@ -108,10 +108,19 @@ jobs:
           tail -n 40 config.log | grep -i 'warn' || true
 
       - name: Build
+        id: build
         working-directory: build
         run: |
           make -j"$(sysctl -n hw.ncpu)"
           ccache --show-stats
+
+      # Saved straight after compiling, so a failure in a later step does not cost the next run an hour.
+      - name: Save the compile cache
+        if: ${{ always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.CX_VERSION }}-${{ github.run_id }}
 
       - name: Install
         working-directory: build
@@ -157,44 +166,6 @@ jobs:
           cat "$PREFIX/BUILD-INFO"
           echo "PATCHED=$patched" >> "$GITHUB_ENV"
 
-      - name: Self-test from a different folder
-        run: |
-          # The package has to work away from the build tree and without Homebrew,
-          # so run it from a copy and search only its own lib folder.
-          W="$RUNNER_TEMP/relocated"
-          cp -R "$PREFIX" "$W"
-          export DYLD_FALLBACK_LIBRARY_PATH="$W/lib:/usr/lib"
-
-          cat > dl.c <<'EOF'
-          #include <dlfcn.h>
-          #include <stdio.h>
-          int main(int argc, char **argv)
-          {
-              int i, bad = 0;
-              for (i = 1; i < argc; i++)
-              {
-                  void *h = dlopen(argv[i], RTLD_NOW);
-                  printf("%s: %s\n", argv[i], h ? "ok" : dlerror());
-                  if (!h) bad = 1;
-              }
-              return bad;
-          }
-          EOF
-          /usr/bin/cc -o dl dl.c
-          ./dl libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib libMoltenVK.dylib
-
-          export WINEPREFIX="$RUNNER_TEMP/selftest-prefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=d"
-          perl -e 'alarm shift; exec @ARGV' 900 "$W/bin/wine" cmd /c "echo selftest-ok" > selftest.out 2> selftest.err || true
-          perl -e 'alarm shift; exec @ARGV' 120 "$W/bin/wineserver" -k || true
-          cat selftest.out
-          tail -n 30 selftest.err || true
-          grep -q 'selftest-ok' selftest.out
-          if grep -qi 'cannot find the FreeType' selftest.err; then
-            echo "::error::Wine could not load FreeType from the bundled libraries"
-            exit 1
-          fi
-          test -f "$WINEPREFIX/drive_c/windows/system32/ntdll.dll"
-
       - name: Package
         run: |
           name="wine-cx-${CX_VERSION}"
@@ -214,6 +185,26 @@ jobs:
           ls -l "$name.tar.xz"
           echo "PKG=$name" >> "$GITHUB_ENV"
           echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      # Kept for a week, so a build that fails the self-test can still be downloaded and studied.
+      - name: Keep the package with the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: |
+            ${{ env.PKG }}.tar.xz
+            ${{ env.PKG }}.tar.xz.sha256
+            manifest.env
+          retention-days: 7
+          compression-level: 0
+
+      - name: Self-test from a different folder
+        run: |
+          # The package has to work away from the build tree and without Homebrew,
+          # so test what was packaged, unpacked somewhere else.
+          mkdir -p "$RUNNER_TEMP/relocated"
+          tar -xJf "$PKG.tar.xz" -C "$RUNNER_TEMP/relocated"
+          bash scripts/selftest.sh "$RUNNER_TEMP/relocated" 240
 
       - name: Publish release
         env:
@@ -236,6 +227,5 @@ jobs:
           name: build-logs
           path: |
             build/config.log
-            selftest.out
-            selftest.err
+            selftest-logs
           if-no-files-found: ignore
