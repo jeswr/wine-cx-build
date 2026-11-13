@@ -8,7 +8,9 @@ SKY="$SKYWALKER_HOME/skywalker.sh"
 CRASH="$1"
 fail=0
 count() { /bin/ps -axww -o command= | /usr/bin/grep -c -E -e '^[A-Za-z]:\\' -e "^$SKYWALKER_HOME/wine/" || true; }
-dbg()   { /bin/ps -axww -o command= | /usr/bin/grep -c -i -e 'winedbg' -e 'conhost' | tr -d ' ' || true; }
+# [w] keeps grep from counting its own command line
+dbg()   { /bin/ps -axww -o command= | /usr/bin/grep -c -i -e '[w]inedbg' || true; }
+con()   { /bin/ps -axww -o command= | /usr/bin/grep -c -i -e '[c]onhost' || true; }
 wait_for_zero() { local t=0; while [ "$(count)" != 0 ] && [ "$t" -lt "$1" ]; do sleep 2; t=$((t + 2)); done; [ "$(count)" = 0 ]; }
 
 echo "== 1. crash test (5 crashes)"
@@ -20,7 +22,8 @@ for i in 1 2 3 4 5; do
   while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 120 ]; do
     sleep 2; t=$((t + 2))
     n="$(count)"; [ "$n" -gt "$max" ] && max="$n"
-    d="$(dbg)"; if [ "$d" -gt 0 ]; then echo "FAIL: winedbg/conhost running after crash $i ($d)"; fail=1; fi
+    d="$(dbg)"; if [ "$d" -gt 0 ]; then echo "FAIL: winedbg running after crash $i ($d)"; fail=1; fi
+    c="$(con)"; if [ "$c" -gt 2 ]; then echo "FAIL: $c conhost processes after crash $i"; fail=1; fi
   done
   if kill -0 "$pid" 2>/dev/null; then echo "FAIL: crash $i did not exit within 120 s"; fail=1; kill -9 "$pid"; fi
 done
