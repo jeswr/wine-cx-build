@@ -47,7 +47,7 @@ jobs:
           fi
 
       - name: Self-test
-        run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 180
+        run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 120
 
       - name: Upload the logs
         if: always()

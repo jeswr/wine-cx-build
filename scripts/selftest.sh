@@ -106,26 +106,47 @@ CAP=$(( $(ps -U "$(id -u)" | wc -l | tr -d ' ') + 300 ))
 echo "Process cap for the attempts: $CAP"
 
 say "Bundled libraries"
+# One process per library, each with a deadline: a library that never finishes
+# loading would otherwise stall the whole check without a word.
 cat > "$TMP/dl.c" <<'EOF'
 #include <dlfcn.h>
 #include <stdio.h>
+#include <unistd.h>
 int main(int argc, char **argv)
 {
-    int i, bad = 0;
-    for (i = 1; i < argc; i++)
-    {
-        void *h = dlopen(argv[i], RTLD_NOW);
-        printf("%s: %s\n", argv[i], h ? "ok" : dlerror());
-        if (!h) bad = 1;
-    }
-    return bad;
+    void *h;
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("%s: ", argv[1]);
+    h = dlopen(argv[1], RTLD_NOW);
+    printf("%s\n", h ? "ok" : dlerror());
+    _exit(h ? 0 : 1);
 }
 EOF
 /usr/bin/cc -arch x86_64 -o "$TMP/dl" "$TMP/dl.c" || exit 1
-if ! "$TMP/dl" libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib libMoltenVK.dylib; then
-  echo "FAILED: a bundled library does not load from $W/lib"
-  exit 1
-fi
+libs_ok=1
+for lib in libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib libMoltenVK.dylib; do
+  "$TMP/dl" "$lib" &
+  lp=$!
+  t=0
+  while kill -0 "$lp" 2>/dev/null && [ "$t" -lt 30 ]; do
+    sleep 1
+    t=$((t + 1))
+  done
+  if kill -0 "$lp" 2>/dev/null; then
+    echo
+    echo "  $lib is still loading after 30s. Where it is waiting:"
+    if command -v sample >/dev/null 2>&1; then
+      sample "$lp" 2 -file "$OUT/dl-$lib.sample.txt" >/dev/null 2>&1
+      grep -A 70 '^Call graph:' "$OUT/dl-$lib.sample.txt" | cut -c1-220
+    fi
+    kill -9 "$lp" 2>/dev/null
+    wait "$lp" 2>/dev/null
+    libs_ok=0
+  elif ! wait "$lp"; then
+    libs_ok=0
+  fi
+done
+if [ "$libs_ok" != 1 ]; then echo "FAILED: a bundled library does not load from $W/lib"; fi
 
 say "Version"
 "$W/bin/wine" --version </dev/null &
@@ -142,6 +163,7 @@ else
   boot nodriver "fixme-all,+process" "mscoree,mshtml=d;winedbg.exe=d;winemac.drv=d" || true
 fi
 
+if [ "$libs_ok" != 1 ]; then ok=0; fi
 if [ "$ok" = 1 ] && grep -qi 'cannot find the FreeType' "$OUT/plain.err"; then
   echo "FAILED: Wine could not load FreeType from the bundled libraries"
   ok=0
