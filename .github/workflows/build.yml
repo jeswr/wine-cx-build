@@ -215,10 +215,15 @@ jobs:
           if [ "$PATCHED" = 1 ] || [ "$GITHUB_REF" != "refs/heads/main" ] || [ "${{ inputs.prerelease == true }}" = "true" ]; then
             pre="--prerelease"
           fi
+          # The workflow's token may not create a tag on a commit that changes workflow
+          # files and is not on main yet, so only builds of main are tagged at their own
+          # commit. Other builds are tagged at main; BUILD-INFO and the notes name the commit.
+          target=""
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then target="--target $GITHUB_SHA"; fi
           gh release create "$TAG" "$PKG.tar.xz" "$PKG.tar.xz.sha256" manifest.env cx.tar.gz.sha256 \
-            --target "$GITHUB_SHA" $pre \
+            $target $pre \
             --title "$TAG" \
-            --notes "Wine from CodeWeavers' published CrossOver ${CX_VERSION} open-source sources (LGPL), built on GitHub's macOS runner, with DXMT ${DXMT_VERSION} in place of Wine's own Direct3D 10/11 (Wine's copies are in orig-dlls). lib/ holds the Homebrew builds of FreeType, GnuTLS, SDL2 and their dependencies (no Vulkan), each under its own licence. Contains no CrossOver application code and no D3DMetal. Start it with DYLD_FALLBACK_LIBRARY_PATH set to the lib folder; scripts/skywalker.sh does that."
+            --notes "Wine from CodeWeavers' published CrossOver ${CX_VERSION} open-source sources (LGPL), built on GitHub's macOS runner, with DXMT ${DXMT_VERSION} in place of Wine's own Direct3D 10/11 (Wine's copies are in orig-dlls). lib/ holds the Homebrew builds of FreeType, GnuTLS, SDL2 and their dependencies (no Vulkan), each under its own licence. Contains no CrossOver application code and no D3DMetal. Start it with DYLD_FALLBACK_LIBRARY_PATH set to the lib folder; scripts/skywalker.sh does that. Built from commit ${GITHUB_SHA} (${GITHUB_REF_NAME})."
 
       - name: Upload logs on failure
         if: failure()
