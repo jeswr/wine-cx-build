@@ -7,6 +7,8 @@
 # Needs: "skywalker.sh install" done, SKYWALKER_HOME and SKY_PREFIX set.
 # Optional: GRAPHICS=split|dxmt|wine (default wine), TRACE=<WINEDEBUG value> (default fixme-all),
 #           FIRST_TRACE=<WINEDEBUG value for the first start, which downloads Steam's update>,
+#           ROUNDS=<one set of Steam options per line>: instead of watching one start, time
+#           each of these starts up to Steam's sign-in screen and write timeline.txt,
 #           STEAMTEST_OUT=<folder for logs and screenshots> (default ./steam-logs)
 # Written for the stock /bin/bash 3.2 on macOS.
 set -uo pipefail
@@ -108,6 +110,66 @@ hang_report first
 mkdir -p "$OUT/first-start"
 mv "$SKYWALKER_HOME"/logs/steam-*.log "$OUT/first-start/" 2>/dev/null || true
 rm -f "$STEAM_DIR"/logs/cef_log.txt "$STEAM_DIR"/logs/webhelper*.txt
+
+# Seconds between two HH:MM:SS times of the same day; "-" when one is missing.
+gap() {
+  if [ -z "$1" ] || [ -z "$2" ]; then echo "-"; return; fi
+  echo "$1 $2" | awk '{ split($1, a, ":"); split($2, b, ":"); print (b[1] * 3600 + b[2] * 60 + b[3]) - (a[1] * 3600 + a[2] * 60 + a[3]) }'
+}
+# Time of the first line of a Steam log that matches. $1 = text, $2 = log file name.
+stamp() {
+  grep -a "$1" "$STEAM_DIR/logs/$2" 2>/dev/null | head -n 1 | sed -n 's/^\[[0-9-]* \([0-9:]*\)\].*/\1/p'
+}
+
+# Times one start of Steam, from the launcher to the sign-in screen. $1 = round number, $2 = options.
+time_round() {
+  local n="$1" args="$2" t0 t=0 dir boot verify helper restart ready login id
+  dir="$OUT/round-$n"
+  mkdir -p "$dir"
+  rm -f "$STEAM_DIR"/logs/*.txt "$SKYWALKER_HOME"/logs/steam-*.log
+  t0="$(date +%H:%M:%S)"
+  # shellcheck disable=SC2086
+  WINEDEBUG="$TRACE" /bin/bash "$L" steam $args > /dev/null 2>&1
+  while [ "$t" -lt 240 ]; do
+    sleep 2; t=$((t + 2))
+    if grep -a -q 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null; then break; fi
+  done
+  sleep 8
+  /bin/bash "$L" windows > "$dir/windows.txt" 2>&1
+  id="$(sed -n 's/.*Sign in to Steam.*[[:space:]]id \([0-9][0-9]*\)$/\1/p' "$dir/windows.txt" | head -n 1)"
+  if [ -n "$id" ]; then screencapture -x -o -l "$id" "$dir/sign-in.png" 2>/dev/null || true; fi
+  boot="$(stamp 'Startup - updater built' bootstrap_log.txt)"
+  verify="$(stamp 'Verification complete' bootstrap_log.txt)"
+  helper="$(stamp 'Started webhelper process' steamui_html.txt)"
+  restart="$(stamp 'Restart webhelper process' steamui_html.txt)"
+  ready="$(stamp 'BrowserReady' steamui_html.txt)"
+  login="$(stamp 'WaitingForCredentials - OK' steamui_login.txt)"
+  {
+    echo "round $n: options [$args]"
+    echo "  seconds after the launcher was started: Steam's starter $(gap "$t0" "$boot"), its checks done $(gap "$t0" "$verify"), browser helper asked for $(gap "$t0" "$helper"), first page ready $(gap "$t0" "$ready"), helper restarted $(gap "$t0" "$restart"), sign-in screen $(gap "$t0" "$login")"
+    echo "  graphics process starts: $(grep -a -c 'GPU process started' "$STEAM_DIR/logs/webhelper_gpu.txt" 2>/dev/null); sign-in window listed: $(grep -c 'Sign in to Steam' "$dir/windows.txt"); capture: $(wc -c < "$dir/sign-in.png" 2>/dev/null | tr -d ' ') bytes"
+  } | tee -a "$OUT/timeline.txt"
+  hang_report "round-$n"
+  /bin/bash "$L" stop > /dev/null 2>&1 || true
+  mkdir -p "$dir/steam"
+  cp "$STEAM_DIR"/logs/*.txt "$dir/steam/" 2>/dev/null || true
+  mv "$SKYWALKER_HOME"/logs/steam-*.log "$dir/" 2>/dev/null || true
+}
+
+if [ -n "${ROUNDS:-}" ]; then
+  n=0
+  while IFS= read -r line <&3; do
+    n=$((n + 1))
+    note "timing start $n with options: [$line]"
+    time_round "$n" "$line"
+  done 3<<ROUNDS_END
+$ROUNDS
+ROUNDS_END
+  note "timings:"
+  cat "$OUT/timeline.txt"
+  /bin/bash "$L" stop > /dev/null 2>&1 || true
+  exit 0
+fi
 
 note "starting Steam"
 WINEDEBUG="$TRACE" /bin/bash "$L" steam "$@"

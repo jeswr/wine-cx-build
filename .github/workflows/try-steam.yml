@@ -22,28 +22,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: arm-seh-1
+          - name: arm-timing-1
             runner: macos-15
-            first_trace: "fixme-all,fixme+virtual,warn+virtual,+seh"
-          - name: arm-seh-2
+          - name: arm-timing-2
             runner: macos-15
-            first_trace: "fixme-all,fixme+virtual,warn+virtual,+seh"
-          - name: arm-plain
+          - name: arm-timing-3
             runner: macos-15
-            first_trace: fixme-all
-          - name: intel-seh
-            runner: macos-15-intel
-            first_trace: "fixme-all,fixme+virtual,warn+virtual,+seh"
-          - name: intel-plain
-            runner: macos-15-intel
-            first_trace: fixme-all
     env:
       TAG: wine-cx-26.3.0-patched-6
-      GRAPHICS: wine
-      STEAM_OPTIONS: ""
+      GRAPHICS: split
       TRACE: fixme-all
-      FIRST_TRACE: ${{ matrix.first_trace }}
+      FIRST_TRACE: fixme-all
       MINUTES: "3"
+      # one start of Steam per line, timed up to the sign-in screen
+      ROUNDS: |-
+        -silent
+        -cef-disable-gpu
+        -noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles
+
+        -cef-disable-gpu -noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles
+        -cef-disable-gpu
     steps:
       - uses: actions/checkout@v4
 
@@ -60,8 +58,7 @@ jobs:
           export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
           export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
           export STEAMTEST_OUT="$PWD/steam-logs"
-          # shellcheck disable=SC2086
-          /bin/bash scripts/steamtest.sh "$MINUTES" $STEAM_OPTIONS
+          /bin/bash scripts/steamtest.sh "$MINUTES"
 
       - name: Upload the logs and screenshots
         if: always()
