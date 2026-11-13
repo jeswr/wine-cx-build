@@ -14,6 +14,7 @@
 #   skywalker.sh graphics dxmt|wine   use DXMT (default) or Wine's own Direct3D 11
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
+#   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
 #   skywalker.sh uninstall       remove the app icon and the launcher's own folder
 #
 # Settings live in ~/Games/skywalker/config.env. For one run, a setting can be
@@ -625,6 +626,7 @@ case "${1:-run}" in
   backup) load_conf; backup_saves ;;
   app) load_conf; create_app ;;
   doctor) cmd_doctor ;;
+  wine) shift; load_conf; need_wine; wine_env; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

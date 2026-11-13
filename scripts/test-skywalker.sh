@@ -72,7 +72,7 @@ for arch in x86_64-windows i386-windows; do
   echo wine > "$W/orig-dlls/$arch/d3d11.dll"
 done
 mkdir -p "$W/bin"
-printf '#!/bin/sh\nexit 0\n' > "$W/bin/wine"
+printf '#!/bin/sh\necho "fake-wine $* prefix=$WINEPREFIX user=$USER"\nexit 0\n' > "$W/bin/wine"
 chmod +x "$W/bin/wine"
 ln -sfn fake-1 "$SKYWALKER_HOME/wine/current"
 bash "$S" graphics wine
@@ -81,6 +81,10 @@ bash "$S" graphics dxmt
 grep -q dxmt "$W/lib/wine/i386-windows/d3d11.dll" || fail "switch back to DXMT did not restore the DLL"
 bash "$S" doctor > "$T/doctor2.txt"
 grep -q "Graphics:     dxmt" "$T/doctor2.txt" || fail "doctor does not report the graphics layer"
+
+echo "-- wine passthrough"
+bash "$S" wine cmd /c ver > "$T/wine.txt"
+grep -q "fake-wine cmd /c ver prefix=$P user=crossover" "$T/wine.txt" || fail "wine passthrough did not set up the environment"
 
 echo "-- frame summary"
 : > "$T/wine.log"

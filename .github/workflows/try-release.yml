@@ -50,6 +50,29 @@ jobs:
       - name: Self-test
         run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 60
 
+      # Only releases made by the current build workflow carry a manifest for the launcher.
+      - name: Install and start it with the launcher
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then
+            echo "Release ${TAG} has no manifest.env; skipping the launcher check."
+            exit 0
+          fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+          /bin/bash scripts/skywalker.sh doctor
+          # no bottle on this machine, so Wine makes a new one; give it a deadline
+          /bin/bash "$SKYWALKER_HOME/skywalker.sh" wine cmd /c "echo launcher-ok" > launcher.out 2> launcher.err &
+          pid=$!
+          t=0
+          while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 240 ]; do sleep 5; t=$((t + 5)); done
+          if kill -0 "$pid" 2>/dev/null; then echo "Wine did not finish within ${t}s"; fi
+          /bin/bash "$SKYWALKER_HOME/skywalker.sh" stop || true
+          kill -9 "$pid" 2>/dev/null || true
+          cat launcher.out
+          tail -n 20 launcher.err || true
+          grep -q 'launcher-ok' launcher.out
+
       - name: Upload the logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -29,6 +29,7 @@ This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games
 | `skywalker.sh bench <label>` | Plays with the frame counter on and prints average fps and the slowest 1% afterwards |
 | `skywalker.sh update` / `rollback` | Installs the latest build / returns to the previous one |
 | `skywalker.sh doctor` | Shows what is installed and what is missing |
+| `skywalker.sh wine <args>` | Runs any Wine program with the launcher's settings, for troubleshooting |
 | `skywalker.sh stop` | Shuts down Steam and Wine |
 
 Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame counter). `SKY_UPSCALE=1 skywalker.sh bench upscaled` overrides one for a single run.
