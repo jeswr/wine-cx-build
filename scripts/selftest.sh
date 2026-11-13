@@ -21,42 +21,74 @@ mkdir -p "$OUT"
 export DYLD_FALLBACK_LIBRARY_PATH="$W/lib:/usr/lib"
 
 say() { printf '\n== %s\n' "$*"; }
-mine() { ps -axo pid=,ppid=,etime=,command= | grep -F "$W/" | grep -v grep; }
-count_mine() { mine | wc -l | tr -d ' '; }
+# Every process started from this Wine folder: pid, parent, cpu, age, command.
+# Wine renames its processes after the Windows program, so match the program
+# file as well as the command line.
+mine_pids() {
+  { ps -axo pid=,comm=; ps -axo pid=,command=; } | awk -v w="$W/" 'index($0, w) {print $1}' | sort -un
+}
+mine() {
+  local p
+  for p in $(mine_pids); do ps -p "$p" -o pid=,ppid=,pcpu=,etime=,command= 2>/dev/null; done
+}
+count_mine() { mine_pids | wc -l | tr -d ' '; }
 
 kill_all() {
+  local p
   WINEPREFIX="$1" "$W/bin/wineserver" -k >/dev/null 2>&1 &
   sleep 3
-  pkill -9 -f "$W/" 2>/dev/null
+  for p in $(mine_pids); do kill -9 "$p" 2>/dev/null; done
+  # On a build machine nothing else is Wine, so sweep up by name as well.
+  if [ -n "${CI:-}" ]; then
+    pkill -9 -x wine 2>/dev/null
+    pkill -9 -x wine-preloader 2>/dev/null
+    pkill -9 -x wineserver 2>/dev/null
+  fi
   sleep 1
 }
 
 snapshot() {
-  local name="$1" main="$2" n newest
+  local name="$1" n p shown=0
   mine > "$OUT/$name.ps"
   n=$(wc -l < "$OUT/$name.ps" | tr -d ' ')
-  echo "  $n Wine processes. Most common command lines:"
-  sed -E 's/^ *[0-9]+ +[0-9]+ +[^ ]+ +//' "$OUT/$name.ps" | cut -c1-200 | sort | uniq -c | sort -rn | head -n 15
-  echo "  First ten (pid, parent, age, command):"
-  head -n 10 "$OUT/$name.ps" | cut -c1-220
-  if command -v sample >/dev/null 2>&1; then
-    newest=$(tail -n 1 "$OUT/$name.ps" | awk '{print $1}')
-    for p in "$main" "$newest"; do
-      [ -n "$p" ] || continue
-      sample "$p" 2 -file "$OUT/$name.sample-$p.txt" >/dev/null 2>&1 || continue
-      echo "  Where process $p is waiting:"
-      grep -A 45 '^Call graph:' "$OUT/$name.sample-$p.txt" | cut -c1-200
-    done
+  echo "  $n Wine processes (pid, parent, cpu, age, command):"
+  head -n 25 "$OUT/$name.ps" | cut -c1-220
+  if [ "$n" -lt 3 ]; then
+    echo "  Everything that looks like Wine:"
+    ps -axo pid=,ppid=,pcpu=,comm= | grep -iE 'wine|\.exe' | grep -v grep | head -n 25 | cut -c1-220
   fi
+  command -v sample >/dev/null 2>&1 || return 0
+  # busiest first; the idle ones are usually just waiting for the busy one
+  for p in $(sort -k3,3 -rn "$OUT/$name.ps" | grep -v wineserver | awk '{print $1}' | head -n 6); do
+    sample "$p" 1 -file "$OUT/$name.sample-$p.txt" >/dev/null 2>&1 || continue
+    vmmap "$p" > "$OUT/$name.vmmap-$p.txt" 2>&1 || true
+    if [ "$shown" -lt 3 ]; then
+      echo "  Where process $p is ($(awk -v p="$p" '$1 == p {print $5, $6, $7}' "$OUT/$name.ps")):"
+      grep -A 40 '^Call graph:' "$OUT/$name.sample-$p.txt" | cut -c1-200
+      shown=$((shown + 1))
+    fi
+  done
 }
 
-# boot <name> <WINEDEBUG> <WINEDLLOVERRIDES>: a fresh prefix, one console command.
+# The interesting part of a long trace: what led up to the first error.
+excerpt() {
+  local f="$1" first
+  first=$(grep -n -m 1 'err:' "$f" | cut -d: -f1)
+  if [ -z "$first" ]; then
+    head -n 3000 "$f" | uniq -f 1 | tail -n 60 | cut -c1-300
+    return
+  fi
+  if [ "$first" -gt 70 ]; then echo "  [... $((first - 70)) lines before this]"; fi
+  sed -n "$((first > 70 ? first - 70 : 1)),$((first + 40))p" "$f" | uniq -c -f 1 | sed -E 's/^ +1 //' | cut -c1-300
+}
+
+# boot <name> <WINEDEBUG> <WINEDLLOVERRIDES> [library path]: a fresh prefix, one console command.
 boot() {
-  local name="$1" dbg="$2" ovr="$3" pfx="$TMP/prefix-$1" t=0 pid rc
-  say "Attempt '$name': WINEDEBUG=$dbg WINEDLLOVERRIDES=$ovr"
+  local name="$1" dbg="$2" ovr="$3" libs="${4:-$DYLD_FALLBACK_LIBRARY_PATH}" pfx="$TMP/prefix-$1" t=0 pid rc
+  say "Attempt '$name': WINEDEBUG=$dbg WINEDLLOVERRIDES=$ovr libraries=$libs"
   (
     ulimit -u "$CAP" 2>/dev/null
-    export WINEPREFIX="$pfx" WINEDEBUG="$dbg" WINEDLLOVERRIDES="$ovr"
+    export WINEPREFIX="$pfx" WINEDEBUG="$dbg" WINEDLLOVERRIDES="$ovr" DYLD_FALLBACK_LIBRARY_PATH="$libs"
     exec "$W/bin/wine" cmd /c "echo selftest-ok" </dev/null >"$OUT/$name.out" 2>"$OUT/$name.err"
   ) &
   pid=$!
@@ -72,7 +104,7 @@ boot() {
   done
   if kill -0 "$pid" 2>/dev/null; then
     echo "  Still running after ${t}s."
-    snapshot "$name" "$pid"
+    snapshot "$name"
     kill_all "$pfx"
     kill -9 "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
@@ -87,9 +119,7 @@ boot() {
   echo "  Output: $(tr -d '\r' < "$OUT/$name.out" | head -n 5)"
   echo "  Messages: $(wc -l < "$OUT/$name.err" | tr -d ' ') lines"
   if [ "$(wc -l < "$OUT/$name.err" | tr -d ' ')" -gt 140 ]; then
-    head -n 80 "$OUT/$name.err" | cut -c1-300
-    echo "  [...]"
-    tail -n 60 "$OUT/$name.err" | cut -c1-300
+    excerpt "$OUT/$name.err"
   else
     cut -c1-300 "$OUT/$name.err"
   fi
@@ -159,8 +189,8 @@ if boot plain "fixme-all" "mscoree,mshtml=d"; then
   ok=1
 else
   # Not a pass, whatever these show: they are here to explain the failure.
-  boot trace "fixme-all,+process,+loaddll" "mscoree,mshtml=d;winedbg.exe=d" || true
-  boot nodriver "fixme-all,+process" "mscoree,mshtml=d;winedbg.exe=d;winemac.drv=d" || true
+  boot trace "fixme-all,+seh,+process,+loaddll" "mscoree,mshtml=d;winedbg.exe=d" || true
+  boot nolibs "fixme-all,+seh" "mscoree,mshtml=d;winedbg.exe=d" "/nonexistent:/usr/lib" || true
 fi
 
 if [ "$libs_ok" != 1 ]; then ok=0; fi
