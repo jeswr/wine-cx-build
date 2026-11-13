@@ -10,6 +10,8 @@ on:
       - '.github/workflows/try-release.yml'
       - 'scripts/selftest.sh'
       - 'scripts/bundle-dylibs.sh'
+      - 'scripts/skywalker.sh'
+      - 'scripts/test-guards.sh'
   workflow_dispatch:
     inputs:
       tag:
@@ -72,6 +74,17 @@ jobs:
           cat launcher.out
           tail -n 20 launcher.err || true
           grep -q 'launcher-ok' launcher.out
+
+      - name: Crash-loop guards
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          brew install mingw-w64
+          printf 'int main(void){ *(volatile int *)0 = 0; return 0; }\n' > crash.c
+          x86_64-w64-mingw32-gcc -O0 -o crash.exe crash.c
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
+          bash scripts/test-guards.sh "$PWD/crash.exe"
 
       - name: Upload the logs
         if: always()

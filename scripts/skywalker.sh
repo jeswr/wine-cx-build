@@ -147,8 +147,11 @@ wine_env() {
   export WINEPREFIX="$PREFIX"
   export USER="$WINE_USER"
   export WINEDEBUG="${WINEDEBUG:--all}"
-  # no Wine Mono / Gecko install prompts: neither Steam nor the game needs them
-  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=}"
+  # no Wine Mono / Gecko install prompts: neither Steam nor the game needs them.
+  # winedbg.exe off: a crashing program must just exit. With the debugger on,
+  # a crash loop once spawned hundreds of winedbg/conhost processes and filled
+  # the Mac's process table.
+  export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=;winedbg.exe=d}"
   # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
   if [ "$MSYNC" = 1 ]; then export WINEMSYNC=1; else unset WINEMSYNC; fi
@@ -398,6 +401,45 @@ cmd_graphics() {
 
 # ---------------------------------------------------------------- running
 
+# Wine's programs show in ps under their Windows path (C:\windows\...), the
+# Unix side under the build's folder.
+count_wine_procs() {
+  /bin/ps -axww -o command= | /usr/bin/grep -c -E -e '^[A-Za-z]:\\' -e "^$WINES/" 2>/dev/null || true
+}
+
+kill_all_wine() {
+  "$CUR/bin/wineserver" -k >/dev/null 2>&1 || true
+  sleep 1
+  /usr/bin/pkill -9 -f '^[A-Za-z]:\\' 2>/dev/null || true
+  /usr/bin/pkill -9 -f "^$WINES/" 2>/dev/null || true
+}
+
+# Runs in the background for as long as our Wine runs. If Wine's process count
+# passes MAX_WINE_PROCS (a crash loop; Steam plus the game use a few dozen),
+# it kills every Wine process and says so. Ends by itself once Wine is gone.
+start_watchdog() {
+  local max="${SKY_MAX_WINE_PROCS:-150}" log="${1:-/dev/null}"
+  (
+    trap '' HUP
+    local n gone=0 t=0
+    while :; do
+      sleep 2; t=$((t + 2))
+      n="$(count_wine_procs)"; n="${n:-0}"
+      if [ "$n" -gt "$max" ]; then
+        echo "skywalker watchdog: $n Wine processes (limit $max); stopping Wine" >> "$log"
+        kill_all_wine
+        notify "Wine got stuck in a loop, so it was stopped. Nothing was lost."
+        exit 1
+      fi
+      if [ "$n" -eq 0 ] && [ "$t" -gt 30 ]; then
+        gone=$((gone + 1)); [ "$gone" -ge 3 ] && exit 0
+      else
+        gone=0
+      fi
+    done
+  ) </dev/null >/dev/null 2>&1 &
+}
+
 shutdown_wine() {
   local i
   if steam_running; then
@@ -407,6 +449,7 @@ shutdown_wine() {
   fi
   "$CUR/bin/wineserver" -k >/dev/null 2>&1 || true
   for i in $(seq 1 10); do our_wineserver_running || break; sleep 1; done
+  if [ "$(count_wine_procs)" != 0 ]; then kill_all_wine; fi
 }
 
 # $1 = log file for Wine's output
@@ -425,6 +468,7 @@ play() {
   notify "Starting the game. This can take a minute."
   cd "$HOME" || true
   # shellcheck disable=SC2086
+  start_watchdog "$log"
   "$CUR/bin/wine" "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
 
   # Wait for the game to appear: 10 minutes covers a Steam self-update.
@@ -468,7 +512,9 @@ cmd_steam() {
   prepare_prefix
   wine_env
   cd "$HOME" || true
-  "$CUR/bin/wine" "$STEAM_EXE" >> "$LOGS/steam-$(date +%Y%m%d-%H%M%S).log" 2>&1 &
+  local log="$LOGS/steam-$(date +%Y%m%d-%H%M%S).log"
+  start_watchdog "$log"
+  "$CUR/bin/wine" "$STEAM_EXE" >> "$log" 2>&1 &
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
 }
 
@@ -626,7 +672,7 @@ case "${1:-run}" in
   backup) load_conf; backup_saves ;;
   app) load_conf; create_app ;;
   doctor) cmd_doctor ;;
-  wine) shift; load_conf; need_wine; wine_env; exec "$CUR/bin/wine" "$@" ;;
+  wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
   *) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
