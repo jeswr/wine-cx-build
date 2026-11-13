@@ -1,0 +1,73 @@
+name: Try Steam on the runner
+
+# Debugging aid, approved by the repository owner: installs Steam (no sign-in)
+# into a throwaway bottle on the runner, starts it with a published build and
+# keeps screenshots and logs. Each row of the matrix is one set-up to compare.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-steam.yml'
+      - 'scripts/steamtest.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  steam:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: intel-wine
+            runner: macos-15-intel
+            graphics: wine
+            args: ""
+          - name: intel-wine-nogpu
+            runner: macos-15-intel
+            graphics: wine
+            args: "-cef-disable-gpu"
+          - name: arm-wine
+            runner: macos-15
+            graphics: wine
+            args: ""
+          - name: arm-dxmt
+            runner: macos-15
+            graphics: dxmt
+            args: ""
+    env:
+      TAG: wine-cx-26.3.0-5
+      GRAPHICS: ${{ matrix.graphics }}
+      STEAM_OPTIONS: ${{ matrix.args }}
+      TRACE: fixme-all
+      MINUTES: "9"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the build with the launcher
+        run: |
+          sw_vers; uname -m
+          if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then echo "Intel programs run here"; else echo "No Rosetta on this runner"; fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+
+      - name: Install Steam, start it and watch the screen
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          export STEAMTEST_OUT="$PWD/steam-logs"
+          # shellcheck disable=SC2086
+          /bin/bash scripts/steamtest.sh "$MINUTES" $STEAM_OPTIONS
+
+      - name: Upload the logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-logs-${{ matrix.name }}
+          path: steam-logs
+          if-no-files-found: ignore
+          retention-days: 5
