@@ -33,7 +33,10 @@ This downloads the latest build, copies the CrossOver "Steam" bottle to `~/Games
 | `skywalker.sh windows` | Lists the windows Wine has on screen, to tell "nothing is shown" from "hidden behind something" |
 | `skywalker.sh graphics split\|dxmt\|wine` | `split` (the default) gives DXMT to the game only and leaves Steam on Wine's own Direct3D, because DXMT cannot draw Steam's windows; `dxmt` or `wine` uses one of them for everything |
 | `skywalker.sh stop` | Shuts down Steam and Wine, and ends any Wine process left behind |
+| `skywalker.sh timeline` | Shows how long the last start took (Steam, Steam's browser part, the game) with the matching lines of Steam's logs |
 
-Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame counter). `SKY_UPSCALE=1 skywalker.sh bench upscaled` overrides one for a single run.
+Steam's own start is most of the wait before the game appears, so the launcher shortens it in two ways. It tells Steam not to start its graphics process (`STEAM_GPU=0`), which cannot work under this Wine and which Steam otherwise retries several times before giving up. And it leaves Steam open for 30 minutes after the game ends (`KEEP_STEAM_MINUTES=30`), so that the next start within that time skips Steam's start altogether; `skywalker.sh stop` closes it at once, and `KEEP_STEAM_MINUTES=0` closes it with the game.
+
+Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame counter, the two above). `SKY_UPSCALE=1 skywalker.sh bench upscaled` overrides one for a single run.
 
 `scripts/try-on-mac.sh` is the earlier one-off test script and is kept for reference.
