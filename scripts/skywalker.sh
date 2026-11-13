@@ -72,9 +72,11 @@ STEAM_GPU=0
 # "graphics d3dmetal" takes Apple's D3DMetal from here: your own copy of the
 # lib folder of Apple's Game Porting Toolkit (lib/external and lib/wine).
 GPTK_DIR="$HOME/Games/gptk"
-# 1 = Wine loads Apple's libd3dshared.dylib when it starts, as CrossOver does
-# for D3DMetal. 0 = D3DMetal's files are used without that.
-D3DMETAL_HOOK=1
+# 0 = D3DMetal's files are used as they are, which is how it was first set up
+# and measured on the Mac. 1 = Wine is also started the way CrossOver starts
+# it for D3DMetal (it loads libd3dshared.dylib itself and reports D3DMetal as
+# the graphics layer). Worth one "bench" to compare.
+D3DMETAL_HOOK=0
 
 MSYNC=1                  # CrossOver's fast locks
 UPSCALE=0                # 1 = draw small and let MetalFX enlarge it. Set the game to 1280x800 first.
@@ -108,7 +110,7 @@ load_conf() {
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
-  : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=1}"
+  : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}"
   for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
@@ -225,19 +227,15 @@ wine_env() {
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-$ovr}"
   # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
-  # Apple's D3DMetal: Wine loads libd3dshared.dylib when it starts and is told
-  # which graphics layer is in use, as CrossOver does for its own D3DMetal mode
+  # Apple's D3DMetal: its files look for each other in lib/external. With
+  # D3DMETAL_HOOK=1 Wine is also started as CrossOver starts it for D3DMetal.
+  unset CX_APPLEGPTK_LIBD3DSHARED_PATH CX_ACTIVE_GRAPHICS_BACKEND DYLD_FALLBACK_FRAMEWORK_PATH
   if [ "$(graphics_now)" = d3dmetal ]; then
+    export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:$CUR/lib/external:/usr/lib"
     if [ "$D3DMETAL_HOOK" = 1 ]; then
       export CX_APPLEGPTK_LIBD3DSHARED_PATH="$CUR/lib/external/libd3dshared.dylib"
-    else
-      unset CX_APPLEGPTK_LIBD3DSHARED_PATH
+      export CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal
     fi
-    export CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal
-    export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:$CUR/lib/external:/usr/lib"
-    export DYLD_FALLBACK_FRAMEWORK_PATH="$CUR/lib/external:/Library/Frameworks:/System/Library/Frameworks"
-  else
-    unset CX_APPLEGPTK_LIBD3DSHARED_PATH CX_ACTIVE_GRAPHICS_BACKEND DYLD_FALLBACK_FRAMEWORK_PATH
   fi
   if [ "$MSYNC" = 1 ]; then export WINEMSYNC=1; else unset WINEMSYNC; fi
   if [ "$AVX" = 1 ]; then export ROSETTA_ADVERTISE_AVX=1; else unset ROSETTA_ADVERTISE_AVX; fi
@@ -552,16 +550,29 @@ game_dxmt_off() {
 # Copies a file, a link or a folder as it is (an instant APFS copy where possible).
 copy_tree() { /bin/cp -cR "$1" "$2" 2>/dev/null || /bin/cp -R "$1" "$2"; }
 
-# Finds Apple's files below GPTK_DIR. Prints "<folder with x86_64-windows>|<folder with libd3dshared.dylib>".
+# Finds Apple's files below GPTK_DIR, which may be the toolkit's lib folder or
+# a folder that holds "Game Porting Toolkit.app". Prints
+# "<folder with x86_64-windows>|<folder with libd3dshared.dylib>".
 gptk_find() {
-  local shared d3d ext
+  local shared ext d3d
   [ -d "$GPTK_DIR" ] || return 1
-  shared="$(/usr/bin/find "$GPTK_DIR/" -maxdepth 6 -name libd3dshared.dylib 2>/dev/null | head -n 1)"
-  d3d="$(/usr/bin/find "$GPTK_DIR/" -maxdepth 7 -path '*/x86_64-windows/d3d11.dll' 2>/dev/null | head -n 1)"
-  [ -n "$shared" ] && [ -n "$d3d" ] || return 1
-  ext="$(dirname "$shared")"
-  [ -e "$ext/D3DMetal.framework" ] || return 1
-  echo "$(dirname "$(dirname "$d3d")")|$ext"
+  while IFS= read -r shared; do
+    ext="$(dirname "$shared")"
+    [ -e "$ext/D3DMetal.framework" ] || continue
+    # the toolkit keeps its Wine DLLs in the folder next to "external"
+    if [ -f "$(dirname "$ext")/wine/x86_64-windows/d3d11.dll" ]; then
+      echo "$(dirname "$ext")/wine|$ext"
+      return 0
+    fi
+    d3d="$(/usr/bin/find "$GPTK_DIR/" -maxdepth 12 -path '*/x86_64-windows/d3d11.dll' 2>/dev/null | head -n 1)"
+    if [ -n "$d3d" ]; then
+      echo "$(dirname "$(dirname "$d3d")")|$ext"
+      return 0
+    fi
+  done <<FOUND
+$(/usr/bin/find "$GPTK_DIR/" -maxdepth 12 -name libd3dshared.dylib 2>/dev/null)
+FOUND
+  return 1
 }
 
 # Takes Apple's files out of the build again and puts back what they replaced.
@@ -581,48 +592,78 @@ d3dmetal_off() {
   rm -rf "$w/d3dmetal-saved" "$w/d3dmetal-files"
 }
 
-# Puts Apple's D3DMetal into the build in use: its Windows-side and Unix-side
-# DLLs take the place of Wine's (which are kept in d3dmetal-saved), and its
-# framework and libd3dshared.dylib go to lib/external, where those DLLs look.
+# The files of Apple's that go into the build. This is the set that was put
+# together by hand on the Mac and shown to work there with the game.
+D3DM_WIN="d3d11.dll dxgi.dll d3d12.dll d3d10core.dll"
+D3DM_UNIX="d3d11.so dxgi.so d3d12.so d3d10.so atidxx64.so nvapi64.so"
+
+# Puts Apple's D3DMetal into the build in use: its Windows-side DLLs take the
+# place of Wine's (which are kept in d3dmetal-saved), their Unix-side partners
+# are links to libd3dshared.dylib, and that library and the framework go to
+# lib/external, where the links point.
 d3dmetal_on() {
-  local w found wdir ext arch f b n=0
+  local w found wdir ext b n=0
   w="$(cd "$CUR" && pwd -P)"
-  found="$(gptk_find)" || die "Apple's D3DMetal was not found in $GPTK_DIR. That folder needs the Game Porting Toolkit's lib folder (lib/external with D3DMetal.framework and libd3dshared.dylib, lib/wine with x86_64-windows/d3d11.dll). GPTK_DIR in $CONF names the folder."
+  found="$(gptk_find)" || die "$(gptk_missing)"
   wdir="${found%%|*}"
   ext="${found#*|}"
+  for b in d3d11.dll dxgi.dll; do
+    [ -f "$wdir/x86_64-windows/$b" ] || die "Apple's $b is missing from $wdir/x86_64-windows."
+  done
   if [ -e "$w/lib/external" ] && [ ! -f "$w/lib/external/.skywalker-d3dmetal" ]; then
     die "The build already has a lib/external folder that the launcher did not make. Install the build again."
   fi
   d3dmetal_off
   : > "$w/d3dmetal-files"
-  for arch in x86_64-windows x86_64-unix; do
-    [ -d "$wdir/$arch" ] || continue
-    mkdir -p "$w/d3dmetal-saved/$arch" "$w/lib/wine/$arch"
-    for f in "$wdir/$arch"/*; do
-      b="$(basename "$f")"
-      case "$b" in *.dll|*.so) ;; *) continue ;; esac
-      [ -e "$f" ] || [ -L "$f" ] || continue
-      if [ -e "$w/lib/wine/$arch/$b" ] || [ -L "$w/lib/wine/$arch/$b" ]; then
-        mv "$w/lib/wine/$arch/$b" "$w/d3dmetal-saved/$arch/$b"
-      fi
-      echo "$arch/$b" >> "$w/d3dmetal-files"
-      copy_tree "$f" "$w/lib/wine/$arch/$b" || { d3dmetal_off; die "Could not copy $b from $wdir."; }
-      n=$((n + 1))
-    done
-  done
-  copy_tree "$ext" "$w/lib/external" || { d3dmetal_off; die "Could not copy $ext."; }
+  mkdir -p "$w/d3dmetal-saved/x86_64-windows" "$w/d3dmetal-saved/x86_64-unix" "$w/lib/wine/x86_64-windows" "$w/lib/wine/x86_64-unix"
+  copy_tree "$ext" "$w/lib/external" || { rm -rf "$w/lib/external"; d3dmetal_off; die "Could not copy $ext."; }
   : > "$w/lib/external/.skywalker-d3dmetal"
   /usr/bin/xattr -dr com.apple.quarantine "$w/lib/external" 2>/dev/null || true
+  for b in $D3DM_WIN; do
+    [ -f "$wdir/x86_64-windows/$b" ] || continue
+    d3dmetal_put "$w" "x86_64-windows/$b"
+    copy_tree "$wdir/x86_64-windows/$b" "$w/lib/wine/x86_64-windows/$b" || { d3dmetal_off; die "Could not copy $b from $wdir."; }
+    n=$((n + 1))
+  done
+  for b in $D3DM_UNIX; do
+    d3dmetal_put "$w" "x86_64-unix/$b"
+    if [ -e "$wdir/x86_64-unix/$b" ] || [ -L "$wdir/x86_64-unix/$b" ]; then
+      copy_tree "$wdir/x86_64-unix/$b" "$w/lib/wine/x86_64-unix/$b" || { d3dmetal_off; die "Could not copy $b from $wdir."; }
+    else
+      ln -s ../../external/libd3dshared.dylib "$w/lib/wine/x86_64-unix/$b" || { d3dmetal_off; die "Could not link $b."; }
+    fi
+    # every one of them must lead to a real file from inside the build
+    [ -e "$w/lib/wine/x86_64-unix/$b" ] || { d3dmetal_off; die "Apple's $b does not lead to libd3dshared.dylib from inside the build."; }
+    n=$((n + 1))
+  done
   say "Apple's D3DMetal is in place ($n files from $wdir, and $ext)"
+}
+
+# Notes one file of the build as replaced and moves Wine's own copy aside. $1 = build, $2 = arch/name.
+d3dmetal_put() {
+  echo "$2" >> "$1/d3dmetal-files"
+  if [ -e "$1/lib/wine/$2" ] || [ -L "$1/lib/wine/$2" ]; then mv "$1/lib/wine/$2" "$1/d3dmetal-saved/$2"; fi
+}
+
+gptk_missing() {
+  echo "Apple's D3DMetal was not found in $GPTK_DIR. That folder needs Apple's Game Porting Toolkit (the app, or its lib folder: external/D3DMetal.framework, external/libd3dshared.dylib and wine/x86_64-windows/d3d11.dll). GPTK_DIR in $CONF names the folder."
 }
 
 # A build that has no graphics choice yet (newly unpacked) takes over the
 # choice of the build before it, so that an update does not change the picture.
-# $1 = tag of the previous build, or "none".
+# A first install uses Apple's D3DMetal when its files are there, and split
+# graphics otherwise. $1 = tag of the previous build, or "none".
 adopt_graphics() {
   local prev="$1" mode="split"
   if [ -f "$CUR/GRAPHICS" ] || [ ! -d "$CUR/orig-dlls" ]; then return 0; fi
-  if [ "$prev" != none ] && [ -f "$WINES/$prev/GRAPHICS" ]; then mode="$(cat "$WINES/$prev/GRAPHICS")"; fi
+  if [ "$prev" = none ] || [ ! -d "$WINES/$prev" ]; then
+    if gptk_find > /dev/null; then mode="d3dmetal"; fi
+  elif [ -f "$WINES/$prev/lib/external/libd3dshared.dylib" ]; then
+    # Apple's files are in the previous build, whether this launcher put them there or not
+    mode="d3dmetal"
+  elif [ -f "$WINES/$prev/GRAPHICS" ]; then
+    mode="$(cat "$WINES/$prev/GRAPHICS")"
+  fi
   case "$mode" in
     split|dxmt|wine) ;;
     d3dmetal)
@@ -644,7 +685,7 @@ apply_graphics() {
   w="$(cd "$CUR" && pwd -P)"
   # check before anything is changed
   if [ "$want" = d3dmetal ]; then
-    gptk_find > /dev/null || die "Apple's D3DMetal was not found in $GPTK_DIR. That folder needs the Game Porting Toolkit's lib folder (lib/external with D3DMetal.framework and libd3dshared.dylib, lib/wine with x86_64-windows/d3d11.dll). GPTK_DIR in $CONF names the folder."
+    gptk_find > /dev/null || die "$(gptk_missing)"
   fi
   d3dmetal_off
   case "$want" in

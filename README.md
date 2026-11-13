@@ -41,6 +41,6 @@ Settings are in `~/Games/skywalker/config.env` (upscaling, frame cap, AVX, frame
 
 ### Apple's D3DMetal
 
-D3DMetal is Apple's own Direct3D layer. It is not part of this repository or its releases and the launcher cannot download it. If you have Apple's Game Porting Toolkit, copy its `lib` folder (the one that holds `external/D3DMetal.framework`, `external/libd3dshared.dylib` and `wine/x86_64-windows/d3d11.dll`) to `~/Games/gptk` (or name another folder as `GPTK_DIR` in `config.env`) and run `skywalker.sh graphics d3dmetal`. The launcher copies those files into the build in use, keeps what they replace, and tells Wine to use them, as CrossOver does for its own D3DMetal mode. `skywalker.sh graphics split` takes them out again.
+D3DMetal is Apple's own Direct3D layer. It is not part of this repository or its releases and the launcher cannot download it. If you have Apple's Game Porting Toolkit, put it in `~/Games/gptk` (the app itself, or its `lib` folder; `GPTK_DIR` in `config.env` can name another folder) and run `skywalker.sh graphics d3dmetal`. The launcher copies Apple's Direct3D 11/12 and DXGI files, `libd3dshared.dylib` and `D3DMetal.framework` from there into the build in use and keeps what they replace; `skywalker.sh graphics split` takes them out again. A first install uses D3DMetal by itself when Apple's files are there, and an update keeps whatever the build before it used.
 
 `scripts/try-on-mac.sh` is the earlier one-off test script and is kept for reference.

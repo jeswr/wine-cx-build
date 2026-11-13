@@ -124,72 +124,103 @@ grep -q "was not found in $G" "$T/d3dm-missing.txt" || fail "no clear message wh
 grep -a -q "winemetal.dll dxmt d3d11" "$W/lib/wine/x86_64-windows/d3d11.dll" || fail "a refused d3dmetal changed the build"
 bash "$S" doctor > "$T/doctor-d3dm.txt"
 grep -q "D3DMetal:     Apple's files not found" "$T/doctor-d3dm.txt" || fail "doctor does not say that Apple's files are missing"
-# a stand-in for the toolkit's lib folder, with the links its Unix-side files are
-mkdir -p "$G/lib/external/D3DMetal.framework/Versions/A" "$G/lib/wine/x86_64-windows" "$G/lib/wine/x86_64-unix"
-echo "apple shared" > "$G/lib/external/libd3dshared.dylib"
-echo "apple framework" > "$G/lib/external/D3DMetal.framework/Versions/A/D3DMetal"
-ln -s Versions/A/D3DMetal "$G/lib/external/D3DMetal.framework/D3DMetal"
-for d in d3d11 dxgi d3d12 nvapi64; do
-  echo "apple $d" > "$G/lib/wine/x86_64-windows/$d.dll"
-  ln -s ../../external/libd3dshared.dylib "$G/lib/wine/x86_64-unix/$d.so"
-done
-echo "not a dll" > "$G/lib/wine/x86_64-windows/README.txt"
+# a stand-in for the toolkit as it is on the Mac: inside an app whose name has
+# spaces, some Unix-side files present as links and some not there at all
+GL="$G/Game Porting Toolkit.app/Contents/Resources/wine/lib"
+mkdir -p "$GL/external/D3DMetal.framework/Versions/A" "$GL/wine/x86_64-windows" "$GL/wine/x86_64-unix"
+echo "apple shared" > "$GL/external/libd3dshared.dylib"
+echo "apple framework" > "$GL/external/D3DMetal.framework/Versions/A/D3DMetal"
+ln -s Versions/A/D3DMetal "$GL/external/D3DMetal.framework/D3DMetal"
+for d in d3d11 dxgi d3d12 d3d10core nvapi64; do echo "apple $d" > "$GL/wine/x86_64-windows/$d.dll"; done
+for d in d3d11 dxgi; do ln -s ../../external/libd3dshared.dylib "$GL/wine/x86_64-unix/$d.so"; done
 mkdir -p "$W/lib/wine/x86_64-unix"
 echo "wine d3d11 unix" > "$W/lib/wine/x86_64-unix/d3d11.so"
 bash "$S" doctor > "$T/doctor-d3dm.txt"
 grep -q "D3DMetal:     Apple's files found" "$T/doctor-d3dm.txt" || fail "doctor does not find Apple's files"
 bash "$S" graphics split
 bash "$S" graphics d3dmetal
-for d in d3d11 dxgi d3d12 nvapi64; do
+for d in d3d11 dxgi d3d12 d3d10core; do
   grep -q "apple $d" "$W/lib/wine/x86_64-windows/$d.dll" || fail "d3dmetal did not put Apple's $d.dll into the build"
-  [ -L "$W/lib/wine/x86_64-unix/$d.so" ] || fail "Apple's $d.so did not stay a link"
-  grep -q "apple shared" "$W/lib/wine/x86_64-unix/$d.so" || fail "Apple's $d.so does not reach libd3dshared from the build"
 done
-[ ! -e "$W/lib/wine/x86_64-windows/README.txt" ] || fail "d3dmetal copied a file that is not a DLL"
+for d in d3d11 dxgi d3d12 d3d10 atidxx64 nvapi64; do
+  [ "$(readlink "$W/lib/wine/x86_64-unix/$d.so")" = ../../external/libd3dshared.dylib ] || fail "$d.so is not a link to libd3dshared"
+  grep -q "apple shared" "$W/lib/wine/x86_64-unix/$d.so" || fail "$d.so does not reach libd3dshared from the build"
+done
+[ ! -e "$W/lib/wine/x86_64-windows/nvapi64.dll" ] || fail "d3dmetal copied a DLL outside the set that was proven on the Mac"
 grep -q "wine d3d11" "$W/lib/wine/i386-windows/d3d11.dll" || fail "d3dmetal did not leave Wine's 32-bit Direct3D in place"
 grep -q "apple framework" "$W/lib/external/D3DMetal.framework/D3DMetal" || fail "the framework was not copied with its links"
 [ ! -e "$GDIR/d3d11.dll" ] || fail "d3dmetal left DXMT in the game folder"
 bash "$S" doctor > "$T/doctor-d3dm.txt"
 grep -q "Graphics:     d3dmetal" "$T/doctor-d3dm.txt" || fail "doctor does not report d3dmetal"
 bash "$S" wine cmd > "$T/wine-d3dm.txt"
-grep -q "d3dshared=$SKYWALKER_HOME/wine/current/lib/external/libd3dshared.dylib backend=d3dmetal" "$T/wine-d3dm.txt" || { cat "$T/wine-d3dm.txt"; fail "Wine is not told about D3DMetal"; }
+grep -q "d3dshared=none backend=none" "$T/wine-d3dm.txt" || { cat "$T/wine-d3dm.txt"; fail "d3dmetal should start Wine as the hand-made setup did unless D3DMETAL_HOOK is on"; }
 if grep -q 'overrides=.*d3d11' "$T/wine-d3dm.txt"; then fail "d3dmetal changes the DLL order"; fi
-SKY_D3DMETAL_HOOK=0 bash "$S" wine cmd > "$T/wine-d3dm0.txt"
-grep -q "d3dshared=none backend=d3dmetal" "$T/wine-d3dm0.txt" || fail "D3DMETAL_HOOK=0 still passes libd3dshared to Wine"
+SKY_D3DMETAL_HOOK=1 bash "$S" wine cmd > "$T/wine-d3dm1.txt"
+grep -q "d3dshared=$SKYWALKER_HOME/wine/current/lib/external/libd3dshared.dylib backend=d3dmetal" "$T/wine-d3dm1.txt" || { cat "$T/wine-d3dm1.txt"; fail "D3DMETAL_HOOK=1 does not tell Wine about D3DMetal"; }
 bash "$S" graphics d3dmetal
 grep -q "wine d3d11" "$W/d3dmetal-saved/x86_64-windows/d3d11.dll" || fail "applying d3dmetal twice lost Wine's own d3d11.dll"
+
 echo "-- a new build takes over the graphics choice"
+# $1 = name of a new stand-in build as it comes out of the archive (DXMT in place)
+new_build() {
+  local d="$SKYWALKER_HOME/wine/$1" arch x
+  mkdir -p "$d/bin"
+  cp -R "$W/orig-dlls" "$d/orig-dlls"
+  for arch in x86_64-windows i386-windows; do
+    mkdir -p "$d/lib/wine/$arch"
+    for x in d3d11 dxgi d3d10core; do fake_dxmt "$x" "$d/lib/wine/$arch/$x.dll"; done
+  done
+  cp "$W/bin/wine" "$d/bin/wine"
+  ln -sfn "$1" "$SKYWALKER_HOME/wine/current"
+}
 W2="$SKYWALKER_HOME/wine/fake-2"
-mkdir -p "$W2/bin"
-cp -R "$W/orig-dlls" "$W2/orig-dlls"
-for arch in x86_64-windows i386-windows; do
-  mkdir -p "$W2/lib/wine/$arch"
-  for d in d3d11 dxgi d3d10core; do fake_dxmt "$d" "$W2/lib/wine/$arch/$d.dll"; done
-done
-cp "$W/bin/wine" "$W2/bin/wine"
-ln -sfn fake-2 "$SKYWALKER_HOME/wine/current"
+new_build fake-2
 bash "$S" adopt-graphics fake-1
 [ "$(cat "$W2/GRAPHICS")" = d3dmetal ] || fail "the new build did not take over d3dmetal"
 grep -q "apple dxgi" "$W2/lib/wine/x86_64-windows/dxgi.dll" || fail "the new build did not get Apple's files"
 grep -q "apple d3d11" "$W/lib/wine/x86_64-windows/d3d11.dll" || fail "the previous build was changed"
 bash "$S" adopt-graphics fake-1
+# a build that had Apple's files put in by hand counts as d3dmetal too
+W3="$SKYWALKER_HOME/wine/fake-3-byhand"
+mkdir -p "$W3/lib/external"
+echo wine > "$W3/GRAPHICS"
+echo "apple shared" > "$W3/lib/external/libd3dshared.dylib"
+new_build fake-4
+bash "$S" adopt-graphics fake-3-byhand
+[ "$(cat "$SKYWALKER_HOME/wine/fake-4/GRAPHICS")" = d3dmetal ] || fail "a build set up by hand for D3DMetal was not recognised"
+# a first install uses D3DMetal when Apple's files are there
+new_build fake-5
+bash "$S" adopt-graphics none
+[ "$(cat "$SKYWALKER_HOME/wine/fake-5/GRAPHICS")" = d3dmetal ] || fail "a first install with Apple's files present did not use D3DMetal"
+# another choice is kept
+echo dxmt > "$W3/GRAPHICS"
+rm -rf "$W3/lib/external"
+new_build fake-6
+bash "$S" adopt-graphics fake-3-byhand
+[ "$(cat "$SKYWALKER_HOME/wine/fake-6/GRAPHICS")" = dxmt ] || fail "the previous build's own choice was not kept"
+# without Apple's files: a first install is split, and d3dmetal falls back with a word about it
 mv "$G" "$G.away"
-rm -f "$W2/GRAPHICS"
+new_build fake-7
+bash "$S" adopt-graphics none
+[ "$(cat "$SKYWALKER_HOME/wine/fake-7/GRAPHICS")" = split ] || fail "a first install without Apple's files should be split"
+ln -sfn fake-2 "$SKYWALKER_HOME/wine/current"
 bash "$S" graphics wine
-rm -f "$W2/GRAPHICS"
+grep -q "wine dxgi" "$W2/lib/wine/x86_64-windows/dxgi.dll" || fail "leaving d3dmetal needs Apple's folder, which it should not"
+new_build fake-8
 bash "$S" adopt-graphics fake-1 > "$T/adopt.txt"
-[ "$(cat "$W2/GRAPHICS")" = split ] || fail "without Apple's files the new build should fall back to split"
+[ "$(cat "$SKYWALKER_HOME/wine/fake-8/GRAPHICS")" = split ] || fail "without Apple's files the new build should fall back to split"
 grep -q "no longer in" "$T/adopt.txt" || fail "no word about the missing files"
 mv "$G.away" "$G"
 ln -sfn fake-1 "$SKYWALKER_HOME/wine/current"
 bash "$S" graphics split
 grep -q "wine d3d11" "$W/lib/wine/x86_64-windows/d3d11.dll" || fail "leaving d3dmetal did not put Wine's d3d11.dll back"
 grep -q "wine d3d11 unix" "$W/lib/wine/x86_64-unix/d3d11.so" || fail "leaving d3dmetal did not put Wine's d3d11.so back"
-for f in lib/wine/x86_64-windows/d3d12.dll lib/wine/x86_64-windows/nvapi64.dll lib/wine/x86_64-unix/dxgi.so lib/external d3dmetal-saved d3dmetal-files; do
+for f in lib/wine/x86_64-windows/d3d12.dll lib/wine/x86_64-unix/dxgi.so lib/wine/x86_64-unix/nvapi64.so lib/external d3dmetal-saved d3dmetal-files; do
   if [ -e "$W/$f" ] || [ -L "$W/$f" ]; then fail "leaving d3dmetal left $f in the build"; fi
 done
+grep -q "wine d3d10core" "$W/lib/wine/x86_64-windows/d3d10core.dll" || fail "leaving d3dmetal did not put Wine's d3d10core.dll back"
 grep -a -q "winemetal.dll dxmt d3d11" "$GDIR/d3d11.dll" || fail "split after d3dmetal did not give the game DXMT"
-grep -q "apple d3d11" "$G/lib/wine/x86_64-windows/d3d11.dll" || fail "the user's own toolkit folder was changed"
+grep -q "apple d3d11" "$GL/wine/x86_64-windows/d3d11.dll" || fail "the user's own toolkit folder was changed"
 bash "$S" graphics dxmt
 
 echo "-- wine passthrough"
