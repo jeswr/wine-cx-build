@@ -230,20 +230,37 @@ bash "$S" wine cmd > "$T/own0.txt"
 if grep -q 'overrides=.*d3d11' "$T/own0.txt"; then fail "the DLL order is changed although Steam has no browser part here"; fi
 mkdir -p "$CEF"
 touch "$CEF/steamwebhelper.exe"
+bash "$S" steam > /dev/null
+[ ! -e "$CEF/d3d11.dll" ] || fail "copies were put into Steam's folder although STEAM_OWN_D3D is off by default"
+export SKY_STEAM_OWN_D3D=1
+# the stand-in Wine keeps what regedit is given
+cp "$NOW/bin/wine" "$T/wine.simple"
+printf '%s\n' '#!/bin/bash' 'echo "$*" >> "$REG_CALLS"' 'case "$1" in regedit) cp "$WINEPREFIX/drive_c/skywalker-steam-d3d.reg" "$REG_COPY" ;; esac' 'echo "overrides=$WINEDLLOVERRIDES"' 'exit 0' > "$NOW/bin/wine"
+export REG_CALLS="$T/reg-calls.txt" REG_COPY="$T/last.reg"
+: > "$REG_CALLS"
 bash "$S" wine cmd > "$T/own1.txt"
-grep -q 'overrides=.*d3d11,dxgi,d3d10core,d3d12=n,b' "$T/own1.txt" || { cat "$T/own1.txt"; fail "with DXMT for everything, local copies are not looked for first"; }
+if grep -q 'overrides=.*d3d11' "$T/own1.txt"; then cat "$T/own1.txt"; fail "the DLL order of every program is changed for the sake of Steam's browser part"; fi
 bash "$S" steam > "$T/own-steam.txt"
+grep -q -x 'regedit /S C:\\skywalker-steam-d3d.reg' "$REG_CALLS" || { cat "$REG_CALLS"; fail "the setting for steamwebhelper.exe was not written through regedit"; }
+tr -d '\r' < "$REG_COPY" > "$T/last-reg.txt"
+grep -q -x -F '[HKEY_CURRENT_USER\Software\Wine\AppDefaults\steamwebhelper.exe\DllOverrides]' "$T/last-reg.txt" || { cat "$T/last-reg.txt"; fail "the registry setting is not for steamwebhelper.exe alone"; }
+grep -q -x -F '"d3d11"="native,builtin"' "$T/last-reg.txt" || fail "the registry setting does not prefer the local d3d11"
+grep -q -x -F '"d3d12"="native,builtin"' "$T/last-reg.txt" || fail "the registry setting does not prefer the local d3d12"
+[ -f "$P/.skywalker-steam-d3d" ] || fail "the bottle has no note that the setting is there"
+[ ! -e "$P/drive_c/skywalker-steam-d3d.reg" ] || fail "the registry file was left in the bottle"
 grep -q "Steam's browser part keeps Wine's own Direct3D" "$T/own-steam.txt" || { cat "$T/own-steam.txt"; fail "nothing was said about Steam's own Direct3D"; }
 for d in d3d11 dxgi d3d10core; do
   grep -q "wine $d" "$CEF/$d.dll" || fail "Steam's browser part did not get Wine's own $d.dll"
 done
 bash "$S" steam > "$T/own-steam2.txt"
 if grep -q "keeps Wine's own Direct3D" "$T/own-steam2.txt"; then fail "the copies for Steam were made a second time"; fi
+[ "$(grep -c '^regedit' "$REG_CALLS")" = 1 ] || fail "the registry setting was written a second time"
 SKY_STEAM_OWN_D3D=0 bash "$S" steam > /dev/null
 [ ! -e "$CEF/d3d11.dll" ] || fail "STEAM_OWN_D3D=0 left the copies in Steam's folder"
 [ ! -e "$CEF/.skywalker-wined3d" ] || fail "STEAM_OWN_D3D=0 left the note in Steam's folder"
-SKY_STEAM_OWN_D3D=0 bash "$S" wine cmd > "$T/own2.txt"
-if grep -q 'overrides=.*d3d11' "$T/own2.txt"; then fail "STEAM_OWN_D3D=0 still changes the DLL order"; fi
+[ "$(grep -c '^regedit' "$REG_CALLS")" = 2 ] || fail "STEAM_OWN_D3D=0 did not take the registry setting out"
+grep -q -F '[-HKEY_CURRENT_USER\Software\Wine\AppDefaults\steamwebhelper.exe]' "$REG_COPY" || fail "the registry setting was not removed"
+[ ! -e "$P/.skywalker-steam-d3d" ] || fail "the note about the registry setting was left behind"
 echo "steam's own" > "$CEF/dxgi.dll"
 bash "$S" steam > "$T/own-foreign.txt"
 grep -q "steam's own" "$CEF/dxgi.dll" || fail "a DLL that belongs to Steam was overwritten"
@@ -262,6 +279,9 @@ bash "$S" steam > /dev/null
 [ ! -e "$CEF/d3d11.dll" ] || fail "split graphics left the copies in Steam's folder"
 grep -q "wine d3d12" "$NOW/lib/wine/x86_64-windows/d3d12.dll" || fail "Wine's own d3d12.dll did not come back"
 bash "$S" graphics dxmt > /dev/null
+[ ! -e "$P/.skywalker-steam-d3d" ] || fail "split graphics left the registry setting for Steam's browser part"
+unset SKY_STEAM_OWN_D3D
+cp "$T/wine.simple" "$NOW/bin/wine"
 rm -rf "${STEAM:?}/bin" "$NOW/lib/wine/x86_64-windows/d3d12.dll"
 rm -f "$SKYWALKER_HOME/steam-session"
 

@@ -23,15 +23,12 @@ jobs:
       matrix:
         include:
           # DXMT for everything, as D3DMetal is for everything on a real Mac:
-          # does Steam's browser part work when it keeps Wine's own Direct3D?
+          # does Steam's browser part load its own copies of Wine's Direct3D,
+          # and does Steam still come up?
           - name: dxmt-steam-own-d3d
             runner: macos-15
             graphics: dxmt
             own: "1"
-          - name: dxmt-everything
-            runner: macos-15
-            graphics: dxmt
-            own: "0"
           - name: split
             runner: macos-15
             graphics: split

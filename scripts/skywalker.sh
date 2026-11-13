@@ -80,11 +80,12 @@ STEAM_ARGS="-silent -nofriendsui -nochatui"
 # 0 = tell Steam not to try (-cef-disable-gpu), 1 = let it try.
 STEAM_GPU=0
 
-# With "graphics dxmt" or "graphics d3dmetal" every program in the bottle would
-# get that graphics layer, Steam included. Steam's browser part does not get
-# on with either. 1 = Steam's browser part keeps Wine's own Direct3D (copies
-# next to steamwebhelper.exe), so only the game gets the other layer. 0 = off.
-STEAM_OWN_D3D=1
+# With "graphics dxmt" or "graphics d3dmetal" every program in the bottle gets
+# that graphics layer, Steam included. 1 = Steam's browser part keeps Wine's
+# own Direct3D instead (copies next to steamwebhelper.exe and a setting for
+# that one program), so only the game gets the other layer. Worth trying if
+# "timeline" shows "GPU process restarts" on every start. 0 = off.
+STEAM_OWN_D3D=0
 
 # "graphics d3dmetal" takes Apple's D3DMetal from here: your own copy of the
 # lib folder of Apple's Game Porting Toolkit (lib/external and lib/wine).
@@ -132,7 +133,7 @@ load_conf() {
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
-  : "${GAME_ARGS=-skipvideos}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=1}"
+  : "${GAME_ARGS=-skipvideos}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
   for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D; do
@@ -258,8 +259,6 @@ wine_env() {
   local ovr="mscoree=;mshtml=;winedbg.exe=d"
   # split graphics: the game's own copies of these (DXMT) come before Wine's
   if [ "$(graphics_now)" = split ]; then ovr="$ovr;d3d11,dxgi,d3d10core=n,b"; fi
-  # the other way round: Steam's browser part has its own copies of Wine's
-  if steam_d3d_wanted; then ovr="$ovr;d3d11,dxgi,d3d10core,d3d12=n,b"; fi
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-$ovr}"
   # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
@@ -749,12 +748,52 @@ game_dxmt_off() {
 
 # ---- Wine's own Direct3D for Steam's browser part
 # With DXMT or D3DMetal as the bottle's graphics layer, Steam's browser part
-# (steamwebhelper.exe, a Chromium) would load it too: DXMT cannot draw its
-# windows, and with D3DMetal its drawing process keeps dying, which costs a
-# restart of the helper on every start. Copies of Wine's own DLLs next to
+# (steamwebhelper.exe, a Chromium) loads it too. STEAM_OWN_D3D=1 keeps that
+# program on Wine's own Direct3D, the combination Steam was debugged with:
+# copies of Wine's own DLLs next to
 # steamwebhelper.exe, without the builtin mark, are what that program then
-# loads; every other program is unaffected.
+# loads, once Wine is told that steamwebhelper.exe prefers its own copies.
+# That is a setting for that one program in the bottle's registry
+# (AppDefaults), so the game and everything else load exactly what they did.
 STEAM_D3D_DLLS="d3d11.dll dxgi.dll d3d10core.dll d3d12.dll"
+
+# Sets ($1 = on) or removes (off) that registry setting, through Wine's own
+# regedit, once: a note in the bottle records that it is there.
+steam_d3d_reg() {
+  local mark="$PREFIX/.skywalker-steam-d3d" reg="$PREFIX/drive_c/skywalker-steam-d3d.reg" pid t=0 b rc
+  if [ "$1" = on ]; then
+    [ "$(cat "$mark" 2>/dev/null)" = "$STEAM_D3D_DLLS" ] && return 0
+  else
+    [ -f "$mark" ] || return 0
+  fi
+  {
+    printf 'REGEDIT4\r\n\r\n'
+    if [ "$1" = on ]; then
+      printf '[HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\steamwebhelper.exe\\DllOverrides]\r\n'
+      for b in $STEAM_D3D_DLLS; do printf '"%s"="native,builtin"\r\n' "${b%.dll}"; done
+    else
+      printf '[-HKEY_CURRENT_USER\\Software\\Wine\\AppDefaults\\steamwebhelper.exe]\r\n'
+    fi
+  } > "$reg"
+  mkdir -p "$LOGS"
+  wine_env
+  ( limit_processes; exec "$CUR/bin/wine" regedit /S 'C:\skywalker-steam-d3d.reg' ) >> "$LOGS/steam-d3d.log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 120 ]; do sleep 1; t=$((t + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    rm -f "$reg"
+    say "The setting for Steam's browser part could not be written in 120 s. It is tried again at the next start. See $LOGS/steam-d3d.log"
+    return 1
+  fi
+  wait "$pid"; rc=$?
+  rm -f "$reg"
+  if [ "$rc" != 0 ]; then
+    say "The setting for Steam's browser part could not be written (regedit ended with $rc). It is tried again at the next start."
+    return 1
+  fi
+  if [ "$1" = on ]; then echo "$STEAM_D3D_DLLS" > "$mark"; else rm -f "$mark"; fi
+}
 
 steam_d3d_wanted() {
   [ "$STEAM_OWN_D3D" = 1 ] || return 1
@@ -807,6 +846,7 @@ steam_d3d_on() {
     done
     say "Steam's browser part keeps Wine's own Direct3D ($(sed 1d "$note" | tr '\n' ' ' | sed 's/ $//') in $dir)"
   done
+  steam_d3d_reg on || true
 }
 
 steam_d3d_off() {
@@ -819,6 +859,7 @@ steam_d3d_off() {
     done
     rm -f "$note"
   done
+  steam_d3d_reg off || true
 }
 
 # ---- Apple's D3DMetal
