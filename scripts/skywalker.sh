@@ -148,7 +148,7 @@ wine_env() {
   export WINEDEBUG="${WINEDEBUG:--all}"
   # no Wine Mono / Gecko install prompts: neither Steam nor the game needs them
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=;mshtml=}"
-  # the build keeps FreeType, GnuTLS, SDL2 and MoltenVK in its own lib folder
+  # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
   if [ "$MSYNC" = 1 ]; then export WINEMSYNC=1; else unset WINEMSYNC; fi
   if [ "$AVX" = 1 ]; then export ROSETTA_ADVERTISE_AVX=1; else unset ROSETTA_ADVERTISE_AVX; fi
@@ -582,7 +582,7 @@ cmd_doctor() {
   if [ -d "$CUR/lib/wine" ]; then
     n="$(find "$CUR/lib/wine/" -name '*.dll' | wc -l | tr -d ' ')"
     echo "Windows DLLs: $n (well under 1000 means Sophos removed some)"
-    for name in libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib libMoltenVK.dylib; do
+    for name in libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib; do
       if [ -f "$CUR/lib/$name" ]; then echo "Library:      $name ok"; else echo "Library:      $name MISSING"; fi
     done
   fi

@@ -1,7 +1,12 @@
 #!/bin/bash
 # Wine loads a few Homebrew libraries by bare name at run time (dlopen):
-#   libfreetype (fonts), libgnutls (TLS and crypto), libSDL2 (controllers),
-#   libMoltenVK (Vulkan).
+#   libfreetype (fonts), libgnutls (TLS and crypto), libSDL2 (controllers).
+#
+# MoltenVK (Vulkan) is left out on purpose. Wine creates a Vulkan instance as
+# soon as its desktop starts, and Homebrew's MoltenVK aborts in vkCreateInstance
+# on the build runner, which takes Wine's desktop down with it. Nothing here
+# needs Vulkan (DXMT and D3DMetal talk to Metal directly), and without the
+# library Wine just logs that Vulkan is unavailable.
 # On the build runner they resolve from /usr/local/lib. On another Mac they do
 # not exist, so copy them and everything they depend on into <prefix>/lib and
 # make the copies relocatable. The launcher then points
@@ -14,7 +19,7 @@ set -euo pipefail
 PREFIX="${1:?usage: bundle-dylibs.sh <install-prefix>}"
 LIB="$PREFIX/lib"
 BREW="$(brew --prefix)"
-ROOTS="libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib libMoltenVK.dylib"
+ROOTS="libfreetype.6.dylib libgnutls.30.dylib libSDL2-2.0.0.dylib"
 
 is_system() {
   case "$1" in /usr/lib/*|/System/*) return 0 ;; esac
@@ -77,13 +82,13 @@ for root in $ROOTS; do
   bundle "$BREW/lib/$root" "$root"
 done
 
-# Homebrew's SDL2 is now a thin layer that loads SDL3 by name when it starts,
-# and shows an error window (which nobody would see, stalling Wine) if SDL3 is
-# missing. otool does not list that kind of dependency, so add it by hand; the
-# layer looks next to itself first.
+# Homebrew's SDL2 is now a thin layer over SDL3. It loads "libSDL3.dylib" by
+# name when it starts, looking next to itself first, and if that fails it puts
+# up an error window and aborts, which kills Wine's device service. otool does
+# not list that kind of dependency, so add it by hand under that exact name.
 if grep -aq 'libSDL3' "$BREW/lib/libSDL2-2.0.0.dylib"; then
-  ROOTS="$ROOTS libSDL3.0.dylib"
-  bundle "$BREW/lib/libSDL3.0.dylib" "libSDL3.0.dylib"
+  ROOTS="$ROOTS libSDL3.dylib"
+  bundle "$BREW/lib/libSDL3.dylib" "libSDL3.dylib"
 fi
 
 # Changing install names invalidates any existing signature; sign ad hoc again.

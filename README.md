@@ -8,7 +8,7 @@ This repository contains build scripts only; it does not contain CrossOver appli
 
 - Wine built from the CrossOver sources (version pinned in `sources.lock`), 32-bit and 64-bit Windows parts.
 - DXMT in place of Wine's own Direct3D 10/11. Wine's copies are kept in `orig-dlls/`.
-- `lib/`: the Homebrew builds of FreeType, GnuTLS, SDL2 and MoltenVK with their dependencies. Wine loads these by name at run time, so it must be started with `DYLD_FALLBACK_LIBRARY_PATH=<build>/lib:/usr/lib`.
+- `lib/`: the Homebrew builds of FreeType, GnuTLS and SDL2 (with SDL3, which it now sits on) and their dependencies. Vulkan (MoltenVK) is left out: nothing here uses it, and it aborted on the build runner. Wine loads these by name at run time, so it must be started with `DYLD_FALLBACK_LIBRARY_PATH=<build>/lib:/usr/lib`.
 - `manifest.env`: the tag, file name and checksum, which the launcher reads.
 
 Run the "Build CrossOver Wine (macOS)" workflow from the Actions tab. A plain build from `main` becomes the latest release. Patched builds, builds from other branches and builds of a newly found CrossOver version are published as pre-releases. A weekly workflow checks for a new CrossOver source version.
