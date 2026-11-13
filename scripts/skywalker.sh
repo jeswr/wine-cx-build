@@ -18,6 +18,7 @@
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
 #   skywalker.sh windows         list the windows Wine has on screen (troubleshooting)
+#   skywalker.sh timeline        show where the time went in the last start (troubleshooting)
 #   skywalker.sh uninstall       remove the app icon and the launcher's own folder
 #
 # Settings live in ~/Games/skywalker/config.env. For one run, a setting can be
@@ -147,6 +148,9 @@ game_running() {
     | /usr/bin/grep -i -F -e "$pats" >/dev/null
 }
 
+helper_running() {
+  /bin/ps -axww -o command= | /usr/bin/grep -i -F 'steamwebhelper.exe' | /usr/bin/grep -v grep >/dev/null
+}
 steam_running() {
   /bin/ps -axww -o command= | /usr/bin/grep -i -F 'steam.exe' | /usr/bin/grep -v grep >/dev/null
 }
@@ -595,29 +599,36 @@ kill_strays() {
 
 # $1 = log file for Wine's output
 play() {
-  local log="$1" i started=0
+  local log="$1" i started=0 t0 t_steam="" t_helper="" t_game=""
   need_wine
   other_wine_running && die "CrossOver or another Wine is running. Quit it first."
   if game_running; then
     say "The game is already running."
     return 0
   fi
+  mkdir -p "$LOGS"
+  t0="$(date +%s)"
+  date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
   backup_saves
   prepare_prefix
   wine_env
   say "Starting Steam and the game with $(current_tag) ($(settings_line))"
-  notify "Starting the game. This can take a minute."
+  notify "Starting the game. This can take a minute." &
   cd "$HOME" || true
   start_watchdog "$log"
   # shellcheck disable=SC2086
   run_wine "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
 
   # Wait for the game to appear: 10 minutes covers a Steam self-update.
-  for i in $(seq 1 200); do
-    sleep 3
-    if game_running; then started=1; break; fi
-    if [ "$i" -gt 20 ] && ! our_wineserver_running; then break; fi
+  # The times of each stage are kept, for "skywalker.sh timeline".
+  for i in $(seq 1 540); do
+    sleep 1
+    if [ -z "$t_steam" ] && steam_running; then t_steam=$(( $(date +%s) - t0 )); fi
+    if [ -z "$t_helper" ] && helper_running; then t_helper=$(( $(date +%s) - t0 )); fi
+    if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
+    if [ "$i" -gt 60 ] && ! our_wineserver_running; then break; fi
   done
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start")" "$(current_tag)" "${t_steam:--}" "${t_helper:--}" "${t_game:--}" "$STEAM_ARGS" >> "$LOGS/startup.tsv"
   if [ "$started" != 1 ]; then
     if our_wineserver_running; then
       notify "Steam is open but the game has not started. Sign in or press Play in Steam."
@@ -630,7 +641,7 @@ play() {
     return 1
   fi
 
-  say "The game is running."
+  say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
   while game_running; do sleep 5; done
   say "The game has exited."
   sleep 10   # give Steam a moment to upload the saves to Steam Cloud
@@ -667,6 +678,31 @@ cmd_stop() {
   wine_env
   shutdown_wine
   say "Stopped."
+}
+
+# Shows where the time went in the last start: the launcher's own stopwatch,
+# then the lines of Steam's logs that mark each stage.
+cmd_timeline() {
+  local since logs f
+  load_conf
+  since="$(cat "$LOGS/last-start" 2>/dev/null || true)"
+  [ -n "$since" ] || die "No start has been recorded yet. Start the game once with this launcher first."
+  logs="$(steam_dir)/logs"
+  echo "Launcher started: $since"
+  if [ -f "$LOGS/startup.tsv" ]; then
+    tail -n 1 "$LOGS/startup.tsv" | /usr/bin/awk -F'\t' '{
+      printf "Seconds until: Steam running %s, Steam browser part running %s, game running %s\n", $3, $4, $5
+      printf "Build: %s   Steam options: %s\n", $2, $6 }'
+  fi
+  echo "Steam's logs from then on:"
+  for f in bootstrap_log.txt steamui_html.txt webhelper.txt connection_log.txt console_log.txt content_log.txt gameprocess_log.txt cloud_log.txt; do
+    [ -f "$logs/$f" ] || continue
+    /usr/bin/awk -v s="[$since]" -v f="${f%.txt}" -v id="$APPID" '
+      substr($0, 1, 1) == "[" && substr($0, 1, 21) >= s {
+        if ($0 ~ /Startup - updater built|Verification complete|Downloading update\.\.\.|Download complete|Download skipped|Update complete|Started webhelper|Restart webhelper|BrowserReady|GPU process restarts|Startup - webhelper launched|LogOnResponse|Logged On|logged on|Game process|App Running|Console Log Start/ || index($0, id))
+          print substr($0, 13, 8), f ": " substr($0, 23, 140)
+      }' "$logs/$f"
+  done | sort -s -k1,1 | head -n 80
 }
 
 # ---------------------------------------------------------------- benchmark
@@ -854,7 +890,8 @@ case "${1:-run}" in
   app) load_conf; create_app ;;
   doctor) cmd_doctor ;;
   windows) cmd_windows ;;
+  timeline) cmd_timeline ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

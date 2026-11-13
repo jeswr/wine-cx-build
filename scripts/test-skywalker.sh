@@ -170,4 +170,39 @@ grep -q 'frames=7800 seconds=130 avg_fps=60.0 low1_fps=17.9 avg_gpu_ms=8.00' "$T
 grep -q 'minute  1:  60.0 fps, slowest 1%  17.9 fps' "$T/summary.txt" || fail "per-minute numbers are wrong"
 if bash "$S" summary /dev/null >/dev/null; then fail "empty log should not summarise"; fi
 
+echo "-- start-up stopwatch and timeline"
+# A stand-in Wine that "starts" Steam and, two seconds later, the game.
+cat > "$W/bin/wine" <<'FAKE'
+#!/bin/bash
+case "$*" in
+  *-applaunch*)
+    ( exec -a 'C:\Program Files (x86)\Steam\steam.exe' sleep 9 ) &
+    ( sleep 2; exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$FAKE_GAME\\game_dx11.EXE" sleep 4 ) &
+    ;;
+esac
+exit 0
+FAKE
+export FAKE_GAME="$GAME"
+if bash "$S" timeline > /dev/null 2>&1; then fail "timeline should say that no start was recorded"; fi
+SKY_STEAM_ARGS="-silent -testflag" bash "$S" run | tee "$T/run.txt"
+grep -q 'The game is running. It started [0-9]*s after the launcher' "$T/run.txt" || fail "run did not report the start-up time"
+grep -q 'The game has exited' "$T/run.txt" || fail "run did not notice the game ending"
+[ "$(wc -l < "$SKYWALKER_HOME/logs/startup.tsv" | tr -d ' ')" = 1 ] || fail "start-up time was not recorded"
+since="$(cat "$SKYWALKER_HOME/logs/last-start")"
+mkdir -p "$STEAM/logs"
+{
+  echo "[2020-01-01 00:00:00] Startup - updater built long ago"
+  echo "[$since] Startup - updater built Nov  9 2026 14:39:29"
+  echo "[$since] Verification complete"
+  echo "[$since] Downloading update (1 of 2 KB)..."
+} > "$STEAM/logs/bootstrap_log.txt"
+echo "[$since] Applying workarounds due to GPU process restarts: browser:0 gpu:3 uptime:27.9" > "$STEAM/logs/webhelper.txt"
+echo "[$since] AppID 920210 state changed : Fully Installed,App Running," > "$STEAM/logs/content_log.txt"
+bash "$S" timeline | tee "$T/timeline.txt"
+grep -q 'Steam options: -silent -testflag' "$T/timeline.txt" || fail "timeline lost the Steam options"
+grep -q 'bootstrap_log: Verification complete' "$T/timeline.txt" || fail "timeline misses Steam's starter"
+grep -q 'webhelper: Applying workarounds due to GPU process restarts' "$T/timeline.txt" || fail "timeline misses the graphics process restarts"
+grep -q 'content_log: AppID 920210 state changed' "$T/timeline.txt" || fail "timeline misses the game's lines"
+if grep -q 'long ago\|1 of 2 KB' "$T/timeline.txt"; then fail "timeline shows lines it should leave out"; fi
+
 echo "All launcher checks passed."
