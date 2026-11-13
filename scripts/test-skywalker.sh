@@ -213,7 +213,7 @@ mkdir -p "$STEAM/logs"
 echo "[$since] Applying workarounds due to GPU process restarts: browser:0 gpu:3 uptime:27.9" > "$STEAM/logs/webhelper.txt"
 echo "[$since] AppID 920210 state changed : Fully Installed,App Running," > "$STEAM/logs/content_log.txt"
 bash "$S" timeline | tee "$T/timeline.txt"
-grep -q 'Steam options: -silent -testflag' "$T/timeline.txt" || fail "timeline lost the Steam options"
+grep -q 'Steam options: -silent -testflag -cef-disable-gpu' "$T/timeline.txt" || fail "timeline lost the Steam options"
 grep -q 'bootstrap_log: Verification complete' "$T/timeline.txt" || fail "timeline misses Steam's starter"
 grep -q 'webhelper: Applying workarounds due to GPU process restarts' "$T/timeline.txt" || fail "timeline misses the graphics process restarts"
 grep -q 'content_log: AppID 920210 state changed' "$T/timeline.txt" || fail "timeline misses the game's lines"
@@ -228,6 +228,7 @@ SKY_KEEP_STEAM_MINUTES=0.2 bash "$S" run | tee "$T/keep2.txt"
 grep -q 'Steam is still open, so the game starts straight away' "$T/keep2.txt" || fail "the open Steam was not reused"
 [ "$(grep -c -e '-applaunch 920210' "$FAKE_DIR/calls.txt")" = 2 ] || fail "expected two game launches"
 [ "$(grep -c -e '-silent' "$FAKE_DIR/calls.txt")" = 1 ] || fail "Steam was started twice"
+grep -q -e '-silent -nofriendsui -nochatui -cef-disable-gpu -applaunch 920210' "$FAKE_DIR/calls.txt" || fail "Steam was not told to skip its graphics process"
 if grep -q -e '-shutdown' "$FAKE_DIR/calls.txt"; then fail "Steam was closed between the two games"; fi
 # other settings: the open Steam cannot pass them on, so it has to be restarted
 SKY_KEEP_STEAM_MINUTES=0.2 SKY_FPS_CAP=30 bash "$S" run | tee "$T/keep3.txt"
@@ -241,6 +242,14 @@ SKY_KEEP_STEAM_MINUTES=5 bash "$S" run > "$T/keep4.txt"
 steam_alive || fail "Steam is gone although it should stay open for 5 minutes"
 bash "$S" stop
 if steam_alive; then fail "stop left Steam open"; fi
+: > "$FAKE_DIR/calls.txt"
+SKY_STEAM_GPU=1 bash "$S" steam > /dev/null
+bash "$S" steam -cef-disable-gpu -foo > /dev/null
+bash "$S" steam -foo > /dev/null
+sleep 2   # Steam is started in the background
+[ "$(cat "$FAKE_DIR/calls.txt")" = "C:\\Program Files (x86)\\Steam\\steam.exe
+C:\\Program Files (x86)\\Steam\\steam.exe -cef-disable-gpu -foo
+C:\\Program Files (x86)\\Steam\\steam.exe -foo -cef-disable-gpu" ] || { cat "$FAKE_DIR/calls.txt"; fail "the graphics process option was not handled as intended"; }
 [ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
 
 echo "All launcher checks passed."

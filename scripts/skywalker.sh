@@ -61,6 +61,11 @@ WINE_USER=crossover      # the Windows user name inside that bottle
 
 APPID=920210             # the game's Steam ID
 STEAM_ARGS="-silent -nofriendsui -nochatui"
+# Steam's windows are drawn by a separate graphics process that cannot start
+# under this Wine. Steam only gives up on it after four failed tries and a
+# restart of its browser part, which costs 20 seconds or more per start.
+# 0 = tell Steam not to try (-cef-disable-gpu), 1 = let it try.
+STEAM_GPU=0
 
 MSYNC=1                  # CrossOver's fast locks
 UPSCALE=0                # 1 = draw small and let MetalFX enlarge it. Set the game to 1280x800 first.
@@ -93,8 +98,8 @@ load_conf() {
   : "${WINE_USER:=crossover}" "${APPID:=920210}" "${STEAM_ARGS:=-silent}"
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
-  : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES; do
+  : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -152,6 +157,13 @@ game_running() {
     | /usr/bin/grep -i -F -e "$pats" >/dev/null
 }
 
+# The option that keeps Steam from trying its graphics process, unless it is
+# wanted or already among the options given.
+steam_gpu_opt() {
+  if [ "$STEAM_GPU" = 0 ]; then
+    case " $* " in *" -cef-disable-gpu "*) ;; *) echo "-cef-disable-gpu" ;; esac
+  fi
+}
 helper_running() {
   /bin/ps -axww -o command= | /usr/bin/grep -i -F 'steamwebhelper.exe' | /usr/bin/grep -v grep >/dev/null
 }
@@ -662,8 +674,8 @@ play() {
     notify "Starting the game. This can take a minute." &
     session_sig > "$SESSION"
     start_watchdog "$log"
-    # shellcheck disable=SC2086
-    run_wine "$STEAM_EXE" $STEAM_ARGS -applaunch "$APPID" >> "$log" 2>&1 &
+    # shellcheck disable=SC2086,SC2046
+    run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) -applaunch "$APPID" >> "$log" 2>&1 &
   fi
 
   # Wait for the game to appear: 10 minutes covers a Steam self-update.
@@ -676,7 +688,8 @@ play() {
     if [ "$i" -gt 60 ] && ! our_wineserver_running; then break; fi
   done
   if [ "$warm" = 1 ]; then t_steam=open; t_helper=open; fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start")" "$(current_tag)" "${t_steam:--}" "${t_helper:--}" "${t_game:--}" "$STEAM_ARGS" >> "$LOGS/startup.tsv"
+  # shellcheck disable=SC2086
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start")" "$(current_tag)" "${t_steam:--}" "${t_helper:--}" "${t_game:--}" "$STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS)" >> "$LOGS/startup.tsv"
   if [ "$started" != 1 ]; then
     if our_wineserver_running; then
       notify "Steam is open but the game has not started. Sign in or press Play in Steam."
@@ -733,7 +746,8 @@ cmd_steam() {
     start_watchdog "$log"
   fi
   if [ "$#" -gt 0 ]; then say "Extra Steam options: $*"; fi
-  run_wine "$STEAM_EXE" "$@" >> "$log" 2>&1 &
+  # shellcheck disable=SC2046
+  run_wine "$STEAM_EXE" "$@" $(steam_gpu_opt "$@") >> "$log" 2>&1 &
   say "Steam is starting. Close it with: bash $HOME_DIR/skywalker.sh stop"
 }
 

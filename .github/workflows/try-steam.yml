@@ -36,12 +36,10 @@ jobs:
       MINUTES: "3"
       # one start of Steam per line, timed up to the sign-in screen
       ROUNDS: |-
-        -silent
-        -cef-disable-gpu
-        -noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles
+        +gpu
 
-        -cef-disable-gpu -noverifyfiles -nobootstrapupdate -skipinitialbootstrap -norepairfiles
-        -cef-disable-gpu
+        +gpu -silent
+        -silent
     steps:
       - uses: actions/checkout@v4
 

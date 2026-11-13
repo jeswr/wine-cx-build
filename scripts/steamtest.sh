@@ -123,13 +123,15 @@ stamp() {
 
 # Times one start of Steam, from the launcher to the sign-in screen. $1 = round number, $2 = options.
 time_round() {
-  local n="$1" args="$2" t0 t=0 dir boot verify helper restart ready login id
+  local n="$1" args="$2" gpu=0 t0 t=0 dir boot verify helper restart ready login id
+  # a line that starts with +gpu lets Steam try its graphics process (the launcher's default is not to)
+  case "$args" in "+gpu"*) gpu=1; args="${args#+gpu}" ;; esac
   dir="$OUT/round-$n"
   mkdir -p "$dir"
   rm -f "$STEAM_DIR"/logs/*.txt "$SKYWALKER_HOME"/logs/steam-*.log
   t0="$(date +%H:%M:%S)"
   # shellcheck disable=SC2086
-  WINEDEBUG="$TRACE" /bin/bash "$L" steam $args > /dev/null 2>&1
+  SKY_STEAM_GPU="$gpu" WINEDEBUG="$TRACE" /bin/bash "$L" steam $args > /dev/null 2>&1
   while [ "$t" -lt 240 ]; do
     sleep 2; t=$((t + 2))
     if grep -a -q 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null; then break; fi
@@ -145,7 +147,7 @@ time_round() {
   ready="$(stamp 'BrowserReady' steamui_html.txt)"
   login="$(stamp 'WaitingForCredentials - OK' steamui_login.txt)"
   {
-    echo "round $n: options [$args]"
+    echo "round $n: options [$args], graphics process allowed: $gpu"
     echo "  seconds after the launcher was started: Steam's starter $(gap "$t0" "$boot"), its checks done $(gap "$t0" "$verify"), browser helper asked for $(gap "$t0" "$helper"), first page ready $(gap "$t0" "$ready"), helper restarted $(gap "$t0" "$restart"), sign-in screen $(gap "$t0" "$login")"
     echo "  graphics process starts: $(grep -a -c 'GPU process started' "$STEAM_DIR/logs/webhelper_gpu.txt" 2>/dev/null); sign-in window listed: $(grep -c 'Sign in to Steam' "$dir/windows.txt"); capture: $(wc -c < "$dir/sign-in.png" 2>/dev/null | tr -d ' ') bytes"
   } | tee -a "$OUT/timeline.txt"
