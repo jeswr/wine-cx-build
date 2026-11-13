@@ -12,8 +12,10 @@
 #   skywalker.sh backup          back up the save files now
 #   skywalker.sh update          install the latest build; the previous one is kept
 #   skywalker.sh rollback        switch back to the previous build
-#   skywalker.sh graphics split|dxmt|wine   split (default): DXMT for the game and Wine's own
-#                                Direct3D for Steam; dxmt or wine: one of them for everything
+#   skywalker.sh graphics split|dxmt|wine|d3dmetal
+#                                split (default): DXMT for the game and Wine's own Direct3D for
+#                                Steam; dxmt or wine: one of them for everything; d3dmetal: Apple's
+#                                D3DMetal from your own copy of the Game Porting Toolkit (GPTK_DIR)
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
@@ -67,6 +69,10 @@ STEAM_ARGS="-silent -nofriendsui -nochatui"
 # 0 = tell Steam not to try (-cef-disable-gpu), 1 = let it try.
 STEAM_GPU=0
 
+# "graphics d3dmetal" takes Apple's D3DMetal from here: your own copy of the
+# lib folder of Apple's Game Porting Toolkit (lib/external and lib/wine).
+GPTK_DIR="$HOME/Games/gptk"
+
 MSYNC=1                  # CrossOver's fast locks
 UPSCALE=0                # 1 = draw small and let MetalFX enlarge it. Set the game to 1280x800 first.
 UPSCALE_FACTOR=2         # 1280x800 x 2 = the Air's native 2560x1600
@@ -99,7 +105,8 @@ load_conf() {
   : "${MSYNC:=1}" "${UPSCALE:=0}" "${UPSCALE_FACTOR:=2}" "${FPS_CAP:=0}" "${AVX:=0}" "${HUD:=0}"
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES; do
+  : "${GPTK_DIR:=$HOME/Games/gptk}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -215,6 +222,16 @@ wine_env() {
   export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-$ovr}"
   # the build keeps FreeType, GnuTLS and SDL2 in its own lib folder
   export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:/usr/lib"
+  # Apple's D3DMetal: Wine loads libd3dshared.dylib when it starts and is told
+  # which graphics layer is in use, as CrossOver does for its own D3DMetal mode
+  if [ "$(graphics_now)" = d3dmetal ]; then
+    export CX_APPLEGPTK_LIBD3DSHARED_PATH="$CUR/lib/external/libd3dshared.dylib"
+    export CX_ACTIVE_GRAPHICS_BACKEND=d3dmetal
+    export DYLD_FALLBACK_LIBRARY_PATH="$CUR/lib:$CUR/lib/external:/usr/lib"
+    export DYLD_FALLBACK_FRAMEWORK_PATH="$CUR/lib/external:/Library/Frameworks:/System/Library/Frameworks"
+  else
+    unset CX_APPLEGPTK_LIBD3DSHARED_PATH CX_ACTIVE_GRAPHICS_BACKEND DYLD_FALLBACK_FRAMEWORK_PATH
+  fi
   if [ "$MSYNC" = 1 ]; then export WINEMSYNC=1; else unset WINEMSYNC; fi
   if [ "$AVX" = 1 ]; then export ROSETTA_ADVERTISE_AVX=1; else unset ROSETTA_ADVERTISE_AVX; fi
 
@@ -413,7 +430,7 @@ cmd_install() {
     fi
   fi
   create_app
-  if [ ! -f "$CUR/GRAPHICS" ] && [ -d "$CUR/orig-dlls" ]; then apply_graphics split; fi
+  adopt_graphics "$prev"
   say "Done. Open \"Skywalker Saga\" from your Applications folder, or run: bash $HOME_DIR/skywalker.sh run"
 }
 
@@ -520,16 +537,114 @@ game_dxmt_off() {
   rm -f "$note"
 }
 
+# ---- Apple's D3DMetal
+# It is not part of this project and cannot be downloaded by the launcher: the
+# files come from the user's own copy of Apple's Game Porting Toolkit in
+# GPTK_DIR. As in CrossOver, D3DMetal then serves every program in the bottle.
+
+# Copies a file, a link or a folder as it is (an instant APFS copy where possible).
+copy_tree() { /bin/cp -cR "$1" "$2" 2>/dev/null || /bin/cp -R "$1" "$2"; }
+
+# Finds Apple's files below GPTK_DIR. Prints "<folder with x86_64-windows>|<folder with libd3dshared.dylib>".
+gptk_find() {
+  local shared d3d ext
+  [ -d "$GPTK_DIR" ] || return 1
+  shared="$(/usr/bin/find "$GPTK_DIR/" -maxdepth 6 -name libd3dshared.dylib 2>/dev/null | head -n 1)"
+  d3d="$(/usr/bin/find "$GPTK_DIR/" -maxdepth 7 -path '*/x86_64-windows/d3d11.dll' 2>/dev/null | head -n 1)"
+  [ -n "$shared" ] && [ -n "$d3d" ] || return 1
+  ext="$(dirname "$shared")"
+  [ -e "$ext/D3DMetal.framework" ] || return 1
+  echo "$(dirname "$(dirname "$d3d")")|$ext"
+}
+
+# Takes Apple's files out of the build again and puts back what they replaced.
+d3dmetal_off() {
+  local w rel
+  w="$(cd "$CUR" && pwd -P)"
+  [ -f "$w/d3dmetal-files" ] || return 0
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    rm -f "$w/lib/wine/$rel"
+    if [ -e "$w/d3dmetal-saved/$rel" ] || [ -L "$w/d3dmetal-saved/$rel" ]; then
+      mv "$w/d3dmetal-saved/$rel" "$w/lib/wine/$rel"
+    fi
+  done < "$w/d3dmetal-files"
+  # only a folder this launcher made is removed
+  if [ -f "$w/lib/external/.skywalker-d3dmetal" ]; then rm -rf "$w/lib/external"; fi
+  rm -rf "$w/d3dmetal-saved" "$w/d3dmetal-files"
+}
+
+# Puts Apple's D3DMetal into the build in use: its Windows-side and Unix-side
+# DLLs take the place of Wine's (which are kept in d3dmetal-saved), and its
+# framework and libd3dshared.dylib go to lib/external, where those DLLs look.
+d3dmetal_on() {
+  local w found wdir ext arch f b n=0
+  w="$(cd "$CUR" && pwd -P)"
+  found="$(gptk_find)" || die "Apple's D3DMetal was not found in $GPTK_DIR. That folder needs the Game Porting Toolkit's lib folder (lib/external with D3DMetal.framework and libd3dshared.dylib, lib/wine with x86_64-windows/d3d11.dll). GPTK_DIR in $CONF names the folder."
+  wdir="${found%%|*}"
+  ext="${found#*|}"
+  if [ -e "$w/lib/external" ] && [ ! -f "$w/lib/external/.skywalker-d3dmetal" ]; then
+    die "The build already has a lib/external folder that the launcher did not make. Install the build again."
+  fi
+  d3dmetal_off
+  : > "$w/d3dmetal-files"
+  for arch in x86_64-windows x86_64-unix; do
+    [ -d "$wdir/$arch" ] || continue
+    mkdir -p "$w/d3dmetal-saved/$arch" "$w/lib/wine/$arch"
+    for f in "$wdir/$arch"/*; do
+      b="$(basename "$f")"
+      case "$b" in *.dll|*.so) ;; *) continue ;; esac
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      if [ -e "$w/lib/wine/$arch/$b" ] || [ -L "$w/lib/wine/$arch/$b" ]; then
+        mv "$w/lib/wine/$arch/$b" "$w/d3dmetal-saved/$arch/$b"
+      fi
+      echo "$arch/$b" >> "$w/d3dmetal-files"
+      copy_tree "$f" "$w/lib/wine/$arch/$b" || { d3dmetal_off; die "Could not copy $b from $wdir."; }
+      n=$((n + 1))
+    done
+  done
+  copy_tree "$ext" "$w/lib/external" || { d3dmetal_off; die "Could not copy $ext."; }
+  : > "$w/lib/external/.skywalker-d3dmetal"
+  /usr/bin/xattr -dr com.apple.quarantine "$w/lib/external" 2>/dev/null || true
+  say "Apple's D3DMetal is in place ($n files from $wdir, and $ext)"
+}
+
+# A build that has no graphics choice yet (newly unpacked) takes over the
+# choice of the build before it, so that an update does not change the picture.
+# $1 = tag of the previous build, or "none".
+adopt_graphics() {
+  local prev="$1" mode="split"
+  if [ -f "$CUR/GRAPHICS" ] || [ ! -d "$CUR/orig-dlls" ]; then return 0; fi
+  if [ "$prev" != none ] && [ -f "$WINES/$prev/GRAPHICS" ]; then mode="$(cat "$WINES/$prev/GRAPHICS")"; fi
+  case "$mode" in
+    split|dxmt|wine) ;;
+    d3dmetal)
+      if ! gptk_find > /dev/null; then
+        echo "The previous build used Apple's D3DMetal, but its files are no longer in $GPTK_DIR. Using split graphics."
+        mode="split"
+      fi ;;
+    *) mode="split" ;;
+  esac
+  apply_graphics "$mode"
+}
+
 # split: DXMT for the game, Wine's own Direct3D for Steam and everything else
 # dxmt:  DXMT for everything (Steam cannot show its windows)
 # wine:  Wine's own Direct3D for everything
+# d3dmetal: Apple's D3DMetal for everything
 apply_graphics() {
   local want="$1" w
   w="$(cd "$CUR" && pwd -P)"
+  # check before anything is changed
+  if [ "$want" = d3dmetal ]; then
+    gptk_find > /dev/null || die "Apple's D3DMetal was not found in $GPTK_DIR. That folder needs the Game Porting Toolkit's lib folder (lib/external with D3DMetal.framework and libd3dshared.dylib, lib/wine with x86_64-windows/d3d11.dll). GPTK_DIR in $CONF names the folder."
+  fi
+  d3dmetal_off
   case "$want" in
     split) set_build_dlls wine; game_dxmt_on ;;
     wine) set_build_dlls wine; game_dxmt_off ;;
     dxmt) set_build_dlls dxmt; game_dxmt_off ;;
+    d3dmetal) set_build_dlls wine; game_dxmt_off; d3dmetal_on ;;
   esac
   echo "$want" > "$w/GRAPHICS"
   say "Graphics for $(current_tag): $want"
@@ -539,8 +654,8 @@ cmd_graphics() {
   local want="${1:-}"
   need_wine
   case "$want" in
-    split|dxmt|wine) ;;
-    *) echo "Graphics in use: $(graphics_now). Switch with: skywalker.sh graphics split|dxmt|wine"; return 0 ;;
+    split|dxmt|wine|d3dmetal) ;;
+    *) echo "Graphics in use: $(graphics_now). Switch with: skywalker.sh graphics split|dxmt|wine|d3dmetal"; return 0 ;;
   esac
   our_wineserver_running && die "Quit the game and Steam first."
   apply_graphics "$want"
@@ -900,6 +1015,7 @@ cmd_doctor() {
   name="$(game_dir_name || true)"
   if [ -n "$name" ]; then echo "Game:         $name"; else echo "Game:         not installed in Steam (ID $APPID)"; fi
   echo "Graphics:     $(graphics_now)"
+  if gptk_find > /dev/null; then echo "D3DMetal:     Apple's files found in $GPTK_DIR"; else echo "D3DMetal:     Apple's files not found in $GPTK_DIR (only needed for: graphics d3dmetal)"; fi
   echo "Settings:     $(settings_line) hud=$HUD"
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
@@ -964,6 +1080,7 @@ case "${1:-run}" in
   update) cmd_install "" ;;
   rollback) cmd_rollback ;;
   graphics) shift; load_conf; cmd_graphics "${1:-}" ;;
+  adopt-graphics) shift; load_conf; need_wine; adopt_graphics "${1:-none}" ;;   # used by the tests
   run) cmd_run ;;
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
@@ -976,5 +1093,5 @@ case "${1:-run}" in
   timeline) cmd_timeline ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
