@@ -1,0 +1,109 @@
+ntdll: Do not let a bad I/O status block kill a thread in the SIGUSR1 handler.
+
+When an asynchronous I/O completes while its thread is running, the server
+interrupts the thread with SIGUSR1 and the result is stored from the signal
+handler (invoke_system_apc). If the status block cannot be written, the
+fault is taken on the signal stack, where Wine can only end the thread
+("nested exception on signal stack"), with every lock it holds. Steam's
+starter dies this way about every second time it updates itself, with the
+loader lock held, and then sits at its small window forever.
+
+The write is now guarded: a fault skips it and is reported, with enough
+detail to find out which request passed the bad block. The message for a
+nested exception also shows the fault address.
+
+--- a/dlls/ntdll/unix/server.c
++++ b/dlls/ntdll/unix/server.c
+@@ -37,6 +37,7 @@
+ #ifdef HAVE_PWD_H
+ # include <pwd.h>
+ #endif
++#include <setjmp.h>
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <stdio.h>
+@@ -390,6 +391,36 @@
+ }
+ 
+ 
++static void invoke_system_apc( const union apc_call *call, union apc_result *result, BOOL self );
++
++/***********************************************************************
++ *              set_apc_async_iosb
++ *
++ * Store the result of an async I/O from a system APC.
++ *
++ * Such an APC also runs from the SIGUSR1 handler, on the signal stack, where
++ * a fault ends the thread together with every lock it holds (the process
++ * then hangs).  A status block that cannot be written is reported and
++ * skipped instead.
++ */
++static void set_apc_async_iosb( client_ptr_t iosb, unsigned int status, ULONG_PTR info, void *callback )
++{
++    struct ntdll_thread_data *data = ntdll_get_thread_data();
++    void *prev = data->jmp_buf;
++    jmp_buf jmp;
++
++    if (!setjmp( jmp ))
++    {
++        data->jmp_buf = jmp;
++        set_async_iosb( iosb, status, info );
++    }
++    else
++        ERR( "cannot write I/O status block %s (status %x, info %lx, callback %p, invoke_system_apc %p)\n",
++             wine_dbgstr_longlong(iosb), status, (unsigned long)info, callback, invoke_system_apc );
++    data->jmp_buf = prev;
++}
++
++
+ /***********************************************************************
+  *              invoke_system_apc
+  */
+@@ -408,6 +439,7 @@
+     {
+         struct async_fileio *user = wine_server_get_ptr( call->async_io.user );
+         ULONG_PTR info = call->async_io.result;
++        void *callback = user->callback;
+         unsigned int status;
+ 
+         result->type = call->type;
+@@ -417,7 +449,7 @@
+             result->async_io.status = status;
+             result->async_io.total = info;
+             /* the server will pass us NULL if a call failed synchronously */
+-            set_async_iosb( call->async_io.sb, result->async_io.status, info );
++            set_apc_async_iosb( call->async_io.sb, result->async_io.status, info, callback );
+         }
+         else result->async_io.status = STATUS_PENDING; /* restart it */
+         break;
+--- a/dlls/ntdll/unix/signal_x86_64.c
++++ b/dlls/ntdll/unix/signal_x86_64.c
+@@ -2310,7 +2310,13 @@
+     struct syscall_frame *frame = get_syscall_frame();
+     DWORD i;
+ 
+-    if (!is_inside_syscall( RSP_sig(sigcontext) )) return FALSE;
++    /* a guarded write can also come from a system APC that runs in the
++     * SIGUSR1 handler; its jump buffer is then on the signal stack too */
++    if (!is_inside_syscall( RSP_sig(sigcontext) ) &&
++        !(is_inside_signal_stack( (void *)RSP_sig(sigcontext) ) &&
++          ntdll_get_thread_data()->jmp_buf &&
++          is_inside_signal_stack( ntdll_get_thread_data()->jmp_buf )))
++        return FALSE;
+ 
+     TRACE_(seh)( "code=%x flags=%x addr=%p ip=%lx tid=%04x\n",
+                  rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress,
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -4639,7 +4639,10 @@
+     {
+         if (is_inside_signal_stack( stack ))
+         {
+-            ERR( "nested exception on signal stack addr %p stack %p\n", rec->ExceptionAddress, stack );
++            ERR( "nested exception on signal stack addr %p stack %p code %x info %lx %lx\n",
++                 rec->ExceptionAddress, stack, (int)rec->ExceptionCode,
++                 rec->NumberParameters > 0 ? (unsigned long)rec->ExceptionInformation[0] : 0,
++                 rec->NumberParameters > 1 ? (unsigned long)rec->ExceptionInformation[1] : 0 );
+             abort_thread(1);
+         }
+         WARN( "exception outside of stack limits addr %p stack %p (%p-%p-%p)\n",
