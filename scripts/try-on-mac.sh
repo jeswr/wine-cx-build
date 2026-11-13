@@ -61,7 +61,7 @@ fi
 
 echo "== Starting Steam (log: $G/skywalker-cx-steam.log)"
 cd "$HOME"
-WINEPREFIX="$PREFIX" USER=crossover WINEMSYNC=1 MTL_HUD_ENABLED=1 \
+WINEPREFIX="$PREFIX" USER=crossover WINEMSYNC=1 MTL_HUD_ENABLED=1 WINEDLLOVERRIDES="mscoree=;mshtml=" \
   "$WINEDIR/bin/wine" 'C:\Program Files (x86)\Steam\steam.exe' \
   >"$G/skywalker-cx-steam.log" 2>&1 &
 echo "Started. Steam's window should appear within a minute or two."
