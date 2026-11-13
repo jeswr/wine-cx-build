@@ -129,17 +129,31 @@ stamp() {
 
 # Times one start of Steam, from the launcher to the sign-in screen. $1 = round number, $2 = options.
 time_round() {
-  local n="$1" args="$2" gpu=0 t0 t=0 dir boot verify helper restart ready login id
+  local n="$1" args="$2" gpu=0 trace="$TRACE" t0 t=0 dir boot verify helper restart ready login id pid
   # a line that starts with +gpu lets Steam try its graphics process (the launcher's default is not to)
   case "$args" in "+gpu"*) gpu=1; args="${args#+gpu}" ;; esac
+  # a line that starts with +trace:<channels> sets Wine's debug channels for that start
+  case "$args" in "+trace:"*) trace="${args#+trace:}"; trace="${trace%% *}"; args="${args#+trace:"$trace"}" ;; esac
   dir="$OUT/round-$n"
   mkdir -p "$dir"
   rm -f "$STEAM_DIR"/logs/*.txt "$SKYWALKER_HOME"/logs/steam-*.log
   t0="$(date +%H:%M:%S)"
   # shellcheck disable=SC2086
-  SKY_STEAM_GPU="$gpu" WINEDEBUG="$TRACE" /bin/bash "$L" steam $args > /dev/null 2>&1
+  SKY_STEAM_GPU="$gpu" WINEDEBUG="$trace" /bin/bash "$L" steam $args > /dev/null 2>&1
   while [ "$t" -lt 240 ]; do
     sleep 2; t=$((t + 2))
+    # which of Steam's programs are busy, to tell computing from waiting
+    {
+      echo "== $(date +%H:%M:%S) +${t}s"
+      /bin/ps -axww -o pid=,pcpu=,cputime=,command= | grep -E ' [A-Za-z]:[\\]' | awk '{ c = $0; sub(/^ *[0-9]+ +[0-9.]+ +[0-9:.]+ +/, "", c); t = ""; if (match(c, /--type=[a-z-]+/)) t = substr(c, RSTART, RLENGTH); sub(/ -.*/, "", c); n = split(c, p, "\\"); print $1, $2, $3, p[n], t }'
+    } >> "$dir/cpu.log" 2>/dev/null
+    # two looks inside Steam and its browser part while the first page is still loading
+    if [ "$n" = 1 ] && { [ "$t" = 12 ] || [ "$t" = 20 ]; }; then
+      for pid in $(/bin/ps -axww -o pid=,command= | grep -i -E '[\\]steam(webhelper)?\.exe' | grep -v -e '--type=' | awk '{ print $1 }' | head -n 3); do
+        # shellcheck disable=SC2016
+        with_deadline 30 /bin/sh -c 'sudo -n sample "$1" 1 -file "$2" > /dev/null 2>&1' sh "$pid" "$dir/sample-${t}s-$pid.txt" || true
+      done
+    fi
     if grep -a -q 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null; then break; fi
   done
   sleep 8
@@ -153,7 +167,7 @@ time_round() {
   ready="$(stamp 'BrowserReady' steamui_html.txt)"
   login="$(stamp 'WaitingForCredentials - OK' steamui_login.txt)"
   {
-    echo "round $n: options [$args], graphics process allowed: $gpu"
+    echo "round $n: options [$args], graphics process allowed: $gpu, trace: $trace"
     echo "  seconds after the launcher was started: Steam's starter $(gap "$t0" "$boot"), its checks done $(gap "$t0" "$verify"), browser helper asked for $(gap "$t0" "$helper"), first page ready $(gap "$t0" "$ready"), helper restarted $(gap "$t0" "$restart"), sign-in screen $(gap "$t0" "$login")"
     echo "  graphics process starts: $(grep -a -c 'GPU process started' "$STEAM_DIR/logs/webhelper_gpu.txt" 2>/dev/null); sign-in window listed: $(grep -c 'Sign in to Steam' "$dir/windows.txt"); capture: $(wc -c < "$dir/sign-in.png" 2>/dev/null | tr -d ' ') bytes"
   } | tee -a "$OUT/timeline.txt"
@@ -161,7 +175,10 @@ time_round() {
   /bin/bash "$L" stop > /dev/null 2>&1 || true
   mkdir -p "$dir/steam"
   cp "$STEAM_DIR"/logs/*.txt "$dir/steam/" 2>/dev/null || true
-  mv "$SKYWALKER_HOME"/logs/steam-*.log "$dir/" 2>/dev/null || true
+  for f in "$SKYWALKER_HOME"/logs/steam-*.log; do
+    [ -f "$f" ] || continue
+    if [ "$(wc -c < "$f")" -gt 3000000 ]; then gzip -c "$f" > "$dir/$(basename "$f").gz"; rm -f "$f"; else mv "$f" "$dir/"; fi
+  done
 }
 
 if [ -n "${ROUNDS:-}" ]; then

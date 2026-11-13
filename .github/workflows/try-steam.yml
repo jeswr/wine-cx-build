@@ -28,12 +28,6 @@ jobs:
             runner: macos-15
           - name: arm-3
             runner: macos-15
-          - name: arm-4
-            runner: macos-15
-          - name: intel-1
-            runner: macos-15-intel
-          - name: intel-2
-            runner: macos-15-intel
     env:
       TAG: wine-cx-26.3.0-patched-7
       GRAPHICS: split
@@ -43,7 +37,9 @@ jobs:
       # one start of Steam per line, timed up to the sign-in screen
       ROUNDS: |-
 
-        +gpu
+        +trace:+timestamp,+pid,+process,+loaddll,fixme-all
+        -no-cef-sandbox
+        -no-cef-sandbox -nofriendsui -nochatui -cef-disable-breakpad
     steps:
       - uses: actions/checkout@v4
 
