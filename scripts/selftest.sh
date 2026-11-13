@@ -22,10 +22,11 @@ export DYLD_FALLBACK_LIBRARY_PATH="$W/lib:/usr/lib"
 
 say() { printf '\n== %s\n' "$*"; }
 # Every process started from this Wine folder: pid, parent, cpu, age, command.
-# Wine renames its processes after the Windows program, so match the program
-# file as well as the command line.
+# Wine renames its child processes after the Windows program (C:\windows\...),
+# and on a build machine nothing else is Wine, so count those there too.
 mine_pids() {
-  { ps -axo pid=,comm=; ps -axo pid=,command=; } | awk -v w="$W/" 'index($0, w) {print $1}' | sort -un
+  { ps -axo pid=,comm=; ps -axo pid=,command=; } | awk -v w="$W/" -v ci="${CI:-}" \
+    'index($0, w) || (ci != "" && $2 ~ /^[A-Za-z]:\\/) {print $1}' | sort -un
 }
 mine() {
   local p
@@ -184,13 +185,115 @@ vp=$!
 ( sleep 20; kill -9 "$vp" 2>/dev/null ) &
 wait "$vp" || echo "wine --version did not finish (exit code $?)"
 
+# What Wine does with Vulkan when its desktop starts, in a plain program.
+vulkan_probe() {
+  say "Vulkan probe (the bundled MoltenVK, outside Wine)"
+  cat > "$TMP/vk.c" <<'EOF'
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdio.h>
+typedef struct { int sType; const void *pNext; const char *app; uint32_t appver; const char *engine; uint32_t engver; uint32_t api; } app_info;
+typedef struct { int sType; const void *pNext; uint32_t flags; const app_info *app; uint32_t nlayers; const char *const *layers; uint32_t next; const char *const *exts; } inst_info;
+int main(void)
+{
+    static char props[4096];
+    app_info app = { 0, NULL, "probe", 1, "probe", 1, (1u << 22) | (1u << 12) };
+    inst_info info = { 1, NULL, 0, &app, 0, NULL, 0, NULL };
+    void *(*gipa)(void *, const char *), *inst = NULL, *dev[8], *h;
+    int (*enum_ext)(const char *, uint32_t *, void *), (*create)(const inst_info *, const void *, void **);
+    int (*enum_dev)(void *, uint32_t *, void **), r;
+    void (*get_props)(void *, void *);
+    uint32_t n = 0;
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+    if (!(h = dlopen("libMoltenVK.dylib", RTLD_NOW))) { printf("dlopen: %s\n", dlerror()); return 1; }
+    gipa = dlsym(h, "vkGetInstanceProcAddr");
+    enum_ext = gipa(NULL, "vkEnumerateInstanceExtensionProperties");
+    r = enum_ext(NULL, &n, NULL);
+    printf("instance extensions: result %d, count %u\n", r, n);
+    create = gipa(NULL, "vkCreateInstance");
+    r = create(&info, NULL, &inst);
+    printf("vkCreateInstance: result %d\n", r);
+    if (r) return 2;
+    enum_dev = gipa(inst, "vkEnumeratePhysicalDevices");
+    n = 8;
+    r = enum_dev(inst, &n, dev);
+    printf("physical devices: result %d, count %u\n", r, n);
+    if (!r && n)
+    {
+        get_props = gipa(inst, "vkGetPhysicalDeviceProperties");
+        get_props(dev[0], props);
+        printf("first device: %s\n", props + 20);
+    }
+    return 0;
+}
+EOF
+  /usr/bin/cc -arch x86_64 -o "$TMP/vk" "$TMP/vk.c" || return 0
+  "$TMP/vk" &
+  local vp=$! t=0
+  while kill -0 "$vp" 2>/dev/null && [ "$t" -lt 30 ]; do
+    sleep 1
+    t=$((t + 1))
+  done
+  if kill -0 "$vp" 2>/dev/null; then
+    echo "  still running after 30s"
+    kill -9 "$vp" 2>/dev/null
+  fi
+  wait "$vp" 2>/dev/null
+  echo "  exit code $?"
+}
+
+# Runs Wine's desktop program under the debugger in a prefix that already
+# works, to get the native call stack of an abort that Wine itself hides.
+lldb_backtrace() {
+  local pfx="$1" lp t=0
+  command -v lldb >/dev/null 2>&1 || return 0
+  say "Native call stack of the failure (lldb)"
+  (
+    export WINEPREFIX="$pfx" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=d;winedbg.exe=d"
+    exec lldb -b \
+      -o 'settings set target.process.stop-on-exec false' \
+      -o 'settings set platform.plugin.darwin.ignored-exceptions EXC_BAD_ACCESS|EXC_BAD_INSTRUCTION|EXC_ARITHMETIC' \
+      -o 'process handle -p true -s false -n false SIGSEGV SIGBUS SIGILL SIGFPE SIGUSR1 SIGUSR2 SIGPIPE SIGCHLD SIGALRM SIGQUIT' \
+      -o 'run' -k 'bt' -k 'kill' -k 'quit' \
+      -- "$W/lib/wine/x86_64-unix/wine" 'C:\windows\system32\explorer.exe' /desktop=probe,640x480 \
+      </dev/null >"$OUT/lldb.txt" 2>&1
+  ) &
+  lp=$!
+  while kill -0 "$lp" 2>/dev/null && [ "$t" -lt 90 ]; do
+    sleep 5
+    t=$((t + 5))
+  done
+  if kill -0 "$lp" 2>/dev/null; then echo "  lldb still running after ${t}s; stopping it"; fi
+  kill -9 "$lp" 2>/dev/null
+  wait "$lp" 2>/dev/null
+  pkill -9 -x lldb 2>/dev/null
+  pkill -9 -x debugserver 2>/dev/null
+  kill_all "$pfx"
+  head -n 150 "$OUT/lldb.txt" | cut -c1-260
+}
+
+OVR="mscoree,mshtml=d"
 ok=0
-if boot plain "fixme-all" "mscoree,mshtml=d"; then
+if boot plain "fixme-all" "$OVR"; then
   ok=1
 else
   # Not a pass, whatever these show: they are here to explain the failure.
-  boot trace "fixme-all,+seh,+process,+loaddll" "mscoree,mshtml=d;winedbg.exe=d" || true
-  boot nolibs "fixme-all,+seh" "mscoree,mshtml=d;winedbg.exe=d" "/nonexistent:/usr/lib" || true
+  mkdir -p "$TMP/lib-nomvk"
+  for f in "$W"/lib/*.dylib; do
+    case "$f" in
+      *MoltenVK*) ;;
+      *) cp "$f" "$TMP/lib-nomvk/" ;;
+    esac
+  done
+  good=""
+  if boot nomvk "fixme-all" "$OVR;winedbg.exe=d" "$TMP/lib-nomvk:/usr/lib"; then
+    good=nomvk
+  elif boot nolibs "fixme-all" "$OVR;winedbg.exe=d" "/nonexistent:/usr/lib"; then
+    good=nolibs
+  fi
+  vulkan_probe
+  if [ -n "$good" ]; then lldb_backtrace "$TMP/prefix-$good"; fi
 fi
 
 if [ "$libs_ok" != 1 ]; then ok=0; fi

@@ -77,6 +77,15 @@ for root in $ROOTS; do
   bundle "$BREW/lib/$root" "$root"
 done
 
+# Homebrew's SDL2 is now a thin layer that loads SDL3 by name when it starts,
+# and shows an error window (which nobody would see, stalling Wine) if SDL3 is
+# missing. otool does not list that kind of dependency, so add it by hand; the
+# layer looks next to itself first.
+if grep -aq 'libSDL3' "$BREW/lib/libSDL2-2.0.0.dylib"; then
+  ROOTS="$ROOTS libSDL3.0.dylib"
+  bundle "$BREW/lib/libSDL3.0.dylib" "libSDL3.0.dylib"
+fi
+
 # Changing install names invalidates any existing signature; sign ad hoc again.
 bad=0
 for f in "$LIB"/*.dylib; do

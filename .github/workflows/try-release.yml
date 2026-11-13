@@ -9,6 +9,7 @@ on:
     paths:
       - '.github/workflows/try-release.yml'
       - 'scripts/selftest.sh'
+      - 'scripts/bundle-dylibs.sh'
   workflow_dispatch:
     inputs:
       tag:
@@ -47,7 +48,7 @@ jobs:
           fi
 
       - name: Self-test
-        run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 120
+        run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 60
 
       - name: Upload the logs
         if: always()
