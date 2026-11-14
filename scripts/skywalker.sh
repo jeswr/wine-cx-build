@@ -72,7 +72,9 @@ BOTTLE_SRC="$HOME/Library/Application Support/CrossOver/Bottles/Steam"
 WINE_USER=crossover      # the Windows user name inside that bottle
 
 APPID=920210             # the game's Steam ID
-GAME_ARGS="-skipvideos"  # options for the game itself: this one skips the logos and the intro film
+# Options for the game itself, added to the ones set for it in Steam (Properties,
+# Launch Options). Empty by default: Steam's own setting is the one place for them.
+GAME_ARGS=""
 STEAM_ARGS="-silent -nofriendsui -nochatui"
 # Steam's windows are drawn by a separate graphics process that cannot start
 # under this Wine. Steam only gives up on it after four failed tries and a
@@ -133,7 +135,7 @@ load_conf() {
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
-  : "${GAME_ARGS=-skipvideos}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
+  : "${GAME_ARGS=}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
   for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D; do
@@ -194,6 +196,24 @@ game_running() {
   pats="$(game_patterns)" || return 1
   /bin/ps -axww -o command= | /usr/bin/grep -v -e grep -e 'skywalker\.sh' \
     | /usr/bin/grep -i -F -e "$pats" >/dev/null
+}
+
+# The game's own command line, as the system shows it: the proof of which
+# options reached it (the launcher's GAME_ARGS and Steam's Launch Options).
+game_cmdline() {
+  local pats
+  pats="$(game_patterns)" || return 1
+  /bin/ps -axww -o command= | /usr/bin/grep -v -e grep -e 'skywalker\.sh' \
+    | /usr/bin/grep -i -F -e "$pats" | head -n 1
+}
+
+# Keeps that command line with the start it belongs to, for "timeline".
+note_game_cmdline() {
+  local f="$LOGS/game-starts.tsv" line
+  line="$(game_cmdline 2>/dev/null || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start" 2>/dev/null || true)" "$(current_tag)" "$(graphics_now)" "$line" >> "$f"
+  if [ "$(wc -l < "$f")" -gt 200 ]; then tail -n 100 "$f" > "$f.new" && mv "$f.new" "$f"; fi
 }
 
 # The option that keeps Steam from trying its graphics process, unless it is
@@ -1220,6 +1240,7 @@ play() {
     return 1
   fi
 
+  note_game_cmdline
   if [ "$warm" = 1 ]; then
     say "The game is running. It started ${t_game}s after the launcher."
   else
@@ -1439,13 +1460,16 @@ cmd_timeline() {
       printf "Build: %s   Steam options: %s\n", $2, $6 }'
   fi
   if steam_updated_since "$since"; then echo "Steam downloaded and installed an update of itself during this start; that is extra time a normal start does not have."; fi
+  if [ -f "$LOGS/game-starts.tsv" ]; then
+    /usr/bin/awk -F'\t' -v s="$since" '$1 == s { printf "Graphics: %s\nThe game was started as: %s\n", $3, $4 }' "$LOGS/game-starts.tsv" | tail -n 2
+  fi
   echo "Steam's logs from then on:"
   for f in bootstrap_log.txt steamui_html.txt webhelper.txt connection_log.txt console_log.txt content_log.txt gameprocess_log.txt cloud_log.txt; do
     [ -f "$logs/$f" ] || continue
     /usr/bin/awk -v s="[$since]" -v f="${f%.txt}" -v id="$APPID" '
       substr($0, 1, 1) == "[" && substr($0, 1, 21) >= s {
         if ($0 ~ /Startup - updater built|Verification complete|Downloading update\.\.\.|Download complete|Download skipped|Update complete|Started webhelper|Restart webhelper|BrowserReady|GPU process restarts|Startup - webhelper launched|LogOnResponse|Logged On|logged on|Game process|App Running|Console Log Start/ || index($0, id))
-          print substr($0, 13, 8), f ": " substr($0, 23, 140)
+          print substr($0, 13, 8), f ": " substr($0, 23, (f == "gameprocess_log") ? 400 : 140)
       }' "$logs/$f"
   done | sort -s -k1,1 | head -n 80
 }

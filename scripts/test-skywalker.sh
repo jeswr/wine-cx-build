@@ -427,14 +427,20 @@ bash "$S" stop > /dev/null
 
 echo "-- an open Steam that cannot start the game, and leftovers of a Steam that has gone"
 : > "$FAKE_DIR/calls.txt"
-SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > /dev/null
-grep -q -e '-applaunch 920210 -skipvideos$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "the game was not told to skip its films"; }
+SKY_GAME_ARGS="-skipvideos -foo" SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > /dev/null
+grep -q -e '-applaunch 920210 -skipvideos -foo$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "GAME_ARGS did not reach the game's start"; }
 : > "$FAKE_DIR/calls.txt"
-SKY_GAME_ARGS="" SKY_KEEP_STEAM_MINUTES=0.5 bash "$S" run > "$T/deaf0.txt"
-grep -q -e '-applaunch 920210$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "an empty GAME_ARGS still passed options to the game"; }
+rm -f "$SKYWALKER_HOME/logs/game-starts.tsv"
+SKY_KEEP_STEAM_MINUTES=0.5 bash "$S" run > "$T/deaf0.txt"
+grep -q -e '-applaunch 920210$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "options were passed to the game although none are set"; }
+# the game's own command line is kept with the start and shown by "timeline"
+[ "$(wc -l < "$SKYWALKER_HOME/logs/game-starts.tsv" | tr -d ' ')" = 1 ] || fail "the game's command line was not noted once"
+grep -q 'game_dx11.EXE 4$' "$SKYWALKER_HOME/logs/game-starts.tsv" || { cat "$SKYWALKER_HOME/logs/game-starts.tsv"; fail "the note does not hold the game's command line"; }
+bash "$S" timeline > "$T/tl-game.txt"
+grep -q 'The game was started as: C:.*game_dx11.EXE 4$' "$T/tl-game.txt" || { cat "$T/tl-game.txt"; fail "timeline does not show the game's command line"; }
 steam_alive || fail "Steam is gone although it should stay open"
 touch "$FAKE_DIR/deaf"
-SKY_GAME_ARGS="" SKY_WARM_WAIT=3 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/deaf1.txt"
+SKY_WARM_WAIT=3 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/deaf1.txt"
 grep -q 'Steam is still open, so the game starts straight away' "$T/deaf1.txt" || fail "the open Steam was not tried first"
 grep -q 'The open Steam did not start the game, so Steam is started afresh' "$T/deaf1.txt" || { cat "$T/deaf1.txt"; fail "a failed hand-over to the open Steam was not noticed"; }
 grep -q 'The game is running' "$T/deaf1.txt" || fail "the game did not start after falling back to a fresh Steam"
