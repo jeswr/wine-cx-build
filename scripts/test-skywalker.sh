@@ -344,6 +344,7 @@ echo "-- start-up stopwatch and timeline"
 cat > "$W/bin/wine" <<'FAKE'
 #!/bin/bash
 echo "$*" >> "$FAKE_DIR/calls.txt"
+echo "validation=${MTL_DEBUG_LAYER:-0}/${MTL_DEBUG_LAYER_ERROR_MODE:-}/${MTL_DEBUG_LAYER_WARNING_MODE:-} hud=${MTL_HUD_ENABLED:-0} winedebug=${WINEDEBUG:-}" >> "$FAKE_DIR/env.txt"
 case "$*" in
   *-shutdown*)
     kill "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" "$(cat "$FAKE_DIR/server.pid" 2>/dev/null)" 2>/dev/null
@@ -427,12 +428,45 @@ bash "$S" stop > /dev/null
 
 echo "-- an open Steam that cannot start the game, and leftovers of a Steam that has gone"
 : > "$FAKE_DIR/calls.txt"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/args0.txt"
+grep -q -e '-applaunch 920210 -skipvideos$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "the game was not told to skip its films"; }
+if grep -q 'Launch Options' "$T/args0.txt"; then fail "a note about Steam's Launch Options appeared although none are set"; fi
+# Steam's own Launch Options for the game: the game takes a switch given twice
+# as not given, so the launcher leaves out what Steam already passes
+mkdir -p "$STEAM/userdata/123/config"
+vdf() {   # $1 = Launch Options of the game, $2 = those of another game
+  printf '"UserLocalConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"apps"\n\t\t\t\t{\n' > "$STEAM/userdata/123/config/localconfig.vdf"
+  printf '\t\t\t\t\t"12345"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LaunchOptions"\t\t"%s"\n\t\t\t\t\t}\n' "$2" >> "$STEAM/userdata/123/config/localconfig.vdf"
+  printf '\t\t\t\t\t"920210"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LastPlayed"\t\t"1"\n\t\t\t\t\t\t"cloud"\n\t\t\t\t\t\t{\n\t\t\t\t\t\t\t"LaunchOptions"\t\t"-nested"\n\t\t\t\t\t\t}\n' >> "$STEAM/userdata/123/config/localconfig.vdf"
+  if [ -n "$1" ]; then printf '\t\t\t\t\t\t"LaunchOptions"\t\t"%s"\r\n' "$1" >> "$STEAM/userdata/123/config/localconfig.vdf"; fi
+  printf '\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n' >> "$STEAM/userdata/123/config/localconfig.vdf"
+}
+vdf "-SkipVideos" "-other"
+: > "$FAKE_DIR/calls.txt"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/args1.txt"
+grep -q -e '-applaunch 920210$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "an option that Steam's Launch Options already hold was passed a second time"; }
+grep -q "already have some of the launcher's options (-SkipVideos), so the launcher adds only: nothing" "$T/args1.txt" || { cat "$T/args1.txt"; fail "leaving an option out was not said"; }
+bash "$S" doctor > "$T/doctor-args.txt"
+grep -q "^Game options: from the launcher: none; from Steam's Launch Options: -SkipVideos$" "$T/doctor-args.txt" || { grep 'Game options' "$T/doctor-args.txt"; fail "doctor does not show where the game's options come from"; }
+vdf "-windowed -skipvideos" "-other"
+: > "$FAKE_DIR/calls.txt"
 SKY_GAME_ARGS="-skipvideos -foo" SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > /dev/null
-grep -q -e '-applaunch 920210 -skipvideos -foo$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "GAME_ARGS did not reach the game's start"; }
+grep -q -e '-applaunch 920210 -foo$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "only the option Steam already holds should have been left out"; }
+vdf "" "-skipvideos"
+: > "$FAKE_DIR/calls.txt"
+SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > /dev/null
+grep -q -e '-applaunch 920210 -skipvideos$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "another game's Launch Options, or a nested entry, were taken for this game's"; }
+rm -rf "$STEAM/userdata/123/config"
+# a run that goes looking for a graphics fault
+: > "$FAKE_DIR/env.txt"
+SKY_GFX_DEBUG=1 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > /dev/null
+grep -q '^validation=1/nslog/nslog hud=1 winedebug=fixme-all$' "$FAKE_DIR/env.txt" || { cat "$FAKE_DIR/env.txt"; fail "GFX_DEBUG did not switch the checks on"; }
+: > "$FAKE_DIR/env.txt"
 : > "$FAKE_DIR/calls.txt"
 rm -f "$SKYWALKER_HOME/logs/game-starts.tsv"
-SKY_KEEP_STEAM_MINUTES=0.5 bash "$S" run > "$T/deaf0.txt"
-grep -q -e '-applaunch 920210$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "options were passed to the game although none are set"; }
+SKY_GAME_ARGS="" SKY_KEEP_STEAM_MINUTES=0.5 bash "$S" run > "$T/deaf0.txt"
+if grep -q -v '^validation=0// hud=0 winedebug=-all$' "$FAKE_DIR/env.txt"; then cat "$FAKE_DIR/env.txt"; fail "the graphics checks stayed on in a normal run"; fi
+grep -q -e '-applaunch 920210$' "$FAKE_DIR/calls.txt" || { cat "$FAKE_DIR/calls.txt"; fail "an empty GAME_ARGS still passed options to the game"; }
 # the game's own command line is kept with the start and shown by "timeline"
 [ "$(wc -l < "$SKYWALKER_HOME/logs/game-starts.tsv" | tr -d ' ')" = 1 ] || fail "the game's command line was not noted once"
 grep -q 'game_dx11.EXE 4$' "$SKYWALKER_HOME/logs/game-starts.tsv" || { cat "$SKYWALKER_HOME/logs/game-starts.tsv"; fail "the note does not hold the game's command line"; }
@@ -440,7 +474,7 @@ bash "$S" timeline > "$T/tl-game.txt"
 grep -q 'The game was started as: C:.*game_dx11.EXE 4$' "$T/tl-game.txt" || { cat "$T/tl-game.txt"; fail "timeline does not show the game's command line"; }
 steam_alive || fail "Steam is gone although it should stay open"
 touch "$FAKE_DIR/deaf"
-SKY_WARM_WAIT=3 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/deaf1.txt"
+SKY_GAME_ARGS="" SKY_WARM_WAIT=3 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/deaf1.txt"
 grep -q 'Steam is still open, so the game starts straight away' "$T/deaf1.txt" || fail "the open Steam was not tried first"
 grep -q 'The open Steam did not start the game, so Steam is started afresh' "$T/deaf1.txt" || { cat "$T/deaf1.txt"; fail "a failed hand-over to the open Steam was not noticed"; }
 grep -q 'The game is running' "$T/deaf1.txt" || fail "the game did not start after falling back to a fresh Steam"
@@ -459,6 +493,27 @@ grep -q 'Steam has gone but parts of it were left running' "$T/orphan1.txt" || {
 grep -q 'The game is running' "$T/orphan1.txt" || fail "the game did not start after the tidy-up"
 if kill -0 "$orphan_helper" 2>/dev/null; then fail "the leftover helper is still running"; fi
 kill "$orphan_server" 2>/dev/null || true
+
+echo "-- a snapshot while something is wrong on screen"
+( exec -a "C:\\Program Files (x86)\\Steam\\steamapps\\common\\$GAME\\game_dx11.EXE -skipvideos" sleep 60 ) &
+SNAP_GAME=$!
+sleep 1
+SKY_SNAPSHOT_SECONDS=1 bash "$S" snapshot > "$T/snap.txt" || fail "snapshot failed"
+SNAP_FILE="$(sed -n 's/^Written to //p' "$T/snap.txt")"
+[ -f "$SNAP_FILE" ] || { cat "$T/snap.txt"; fail "snapshot did not write its file"; }
+grep -q "^Game process: $SNAP_GAME$" "$SNAP_FILE" || { head -n 8 "$SNAP_FILE"; fail "snapshot did not find the game"; }
+grep -q '^The game was started as: C:.*game_dx11.EXE -skipvideos' "$SNAP_FILE" || fail "snapshot lacks the game's command line"
+for part in "Windows on screen" "Processor use over 1 seconds" "screen and window settings" "Last lines of the run log" "threads are doing" "system log"; do
+  grep -q "^== .*$part" "$SNAP_FILE" || fail "snapshot lacks the part: $part"
+done
+grep -q 'Wine used .* of one processor core' "$SNAP_FILE" || fail "snapshot lacks the processor figures"
+if [ -x /usr/bin/sample ]; then
+  grep -q -i 'call graph\|Analysis of sampling' "$SNAP_FILE" || { sed -n '/threads are doing/,/system log/p' "$SNAP_FILE" | head -n 20; fail "snapshot holds no sample of the game"; }
+fi
+kill "$SNAP_GAME" 2>/dev/null || true
+wait "$SNAP_GAME" 2>/dev/null || true
+bash "$S" snapshot > "$T/snap2.txt" || fail "snapshot without a game failed"
+grep -q '^Game process: not running$' "$(sed -n 's/^Written to //p' "$T/snap2.txt")" || fail "snapshot without a game does not say so"
 
 echo "-- Steam updating itself is named"
 since="$(cat "$SKYWALKER_HOME/logs/last-start")"

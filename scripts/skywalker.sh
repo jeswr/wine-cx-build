@@ -31,6 +31,8 @@
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
 #   skywalker.sh windows         list the windows Wine has on screen (troubleshooting)
 #   skywalker.sh timeline        show where the time went in the last start (troubleshooting)
+#   skywalker.sh snapshot        while the game shows something wrong (a black screen, a freeze):
+#                                write what can be seen from outside to one file (troubleshooting)
 #   skywalker.sh uninstall       remove the app icon and the launcher's own folder
 #
 # Settings live in ~/Games/skywalker/config.env. For one run, a setting can be
@@ -72,9 +74,11 @@ BOTTLE_SRC="$HOME/Library/Application Support/CrossOver/Bottles/Steam"
 WINE_USER=crossover      # the Windows user name inside that bottle
 
 APPID=920210             # the game's Steam ID
-# Options for the game itself, added to the ones set for it in Steam (Properties,
-# Launch Options). Empty by default: Steam's own setting is the one place for them.
-GAME_ARGS=""
+# Options for the game itself: this one skips the logos and the intro film.
+# Steam adds them to the Launch Options set for the game in Steam, and the
+# game takes a switch given twice as not given, so the launcher leaves out
+# any that Steam's Launch Options already hold.
+GAME_ARGS="-skipvideos"
 STEAM_ARGS="-silent -nofriendsui -nochatui"
 # Steam's windows are drawn by a separate graphics process that cannot start
 # under this Wine. Steam only gives up on it after four failed tries and a
@@ -104,6 +108,10 @@ UPSCALE_FACTOR=2         # 1280x800 x 2 = the Air's native 2560x1600
 FPS_CAP=0                # 0 = leave it to the game. Otherwise 60 or 30.
 AVX=0                    # 1 = let Rosetta offer AVX2 to the game
 HUD=0                    # 1 = show Apple's frame counter
+# 1 = for one run that goes looking for a graphics fault: frame counter on,
+# Apple's Metal validation on (it logs wrong Metal calls instead of stopping),
+# Wine's error lines on. Slower; not for normal play.
+GFX_DEBUG=0
 
 # Steam stays open this many minutes after the game ends, so that the next
 # start skips Steam's own slow start. 0 = close Steam with the game.
@@ -135,10 +143,10 @@ load_conf() {
   : "${SAVE_BACKUP_DIR:=$HOME/Games/SkywalkerSaga-saves}" "${SAVE_BACKUPS:=20}"
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
-  : "${GAME_ARGS=}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
+  : "${GAME_ARGS=-skipvideos}" "${GFX_DEBUG:=0}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D; do
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D GFX_DEBUG; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -147,7 +155,7 @@ load_conf() {
 }
 
 settings_line() {
-  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX d3dmhook=$D3DMETAL_HOOK steamd3d=$STEAM_OWN_D3D"
+  echo "graphics=$(graphics_now) msync=$MSYNC upscale=$UPSCALE factor=$UPSCALE_FACTOR cap=$FPS_CAP avx=$AVX d3dmhook=$D3DMETAL_HOOK steamd3d=$STEAM_OWN_D3D gfxdebug=$GFX_DEBUG"
 }
 
 # ---------------------------------------------------------------- helpers
@@ -196,6 +204,53 @@ game_running() {
   pats="$(game_patterns)" || return 1
   /bin/ps -axww -o command= | /usr/bin/grep -v -e grep -e 'skywalker\.sh' \
     | /usr/bin/grep -i -F -e "$pats" >/dev/null
+}
+
+# The Launch Options set for the game in Steam itself (Properties), read from
+# the settings file of the Steam user who was active last. Steam keeps them in
+# memory while it runs and writes the file when it closes.
+steam_launch_options() {
+  local f newest="" d
+  d="$(steam_dir)/userdata"
+  for f in "$d"/*/config/localconfig.vdf; do
+    [ -f "$f" ] || continue
+    if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then newest="$f"; fi
+  done
+  [ -n "$newest" ] || return 0
+  /usr/bin/awk -v id="\"$APPID\"" '
+    { line = $0; gsub(/^[ \t]+|[ \t\r]+$/, "", line) }
+    !inapp && line == id { want = 1; next }
+    want && line == "{" { inapp = 1; depth = 1; want = 0; next }
+    want { want = 0 }
+    inapp {
+      if (line == "{") depth++
+      else if (line == "}") { depth--; if (depth == 0) inapp = 0 }
+      else if (depth == 1 && match(line, /^"LaunchOptions"[ \t]+"/)) {
+        v = substr(line, RLENGTH + 1); sub(/"$/, "", v)
+        gsub(/\\"/, "\"", v); gsub(/\\\\/, "\\", v)
+        print v; exit
+      }
+    }' "$newest"
+}
+
+# GAME_ARGS without the options Steam's Launch Options already hold.
+game_args() {
+  local have w out=""
+  have=" $(steam_launch_options | tr 'A-Z\t' 'a-z ') "
+  for w in $GAME_ARGS; do
+    case "$have" in
+      *" $(echo "$w" | tr 'A-Z' 'a-z') "*) ;;
+      *) out="${out:+$out }$w" ;;
+    esac
+  done
+  echo "$out"
+}
+
+# Says so when an option is left out for that reason.
+note_game_args() {
+  local eff="$1"
+  [ "$eff" = "$GAME_ARGS" ] && return 0
+  say "Steam's own Launch Options for the game already have some of the launcher's options ($(steam_launch_options)), so the launcher adds only: ${eff:-nothing}"
 }
 
 # The game's own command line, as the system shows it: the proof of which
@@ -271,7 +326,11 @@ run_wine() {
 wine_env() {
   export WINEPREFIX="$PREFIX"
   export USER="$WINE_USER"
-  export WINEDEBUG="${WINEDEBUG:--all}"
+  if [ "$GFX_DEBUG" = 1 ]; then
+    export WINEDEBUG="${WINEDEBUG:-fixme-all}"
+  else
+    export WINEDEBUG="${WINEDEBUG:--all}"
+  fi
   # no Wine Mono / Gecko install prompts: neither Steam nor the game needs them.
   # winedbg.exe off: a crashing program must just exit. With the debugger on,
   # a crash loop once spawned hundreds of winedbg/conhost processes and filled
@@ -309,7 +368,12 @@ wine_env() {
   fi
   if [ -n "$conf" ]; then export DXMT_CONFIG="$conf"; else unset DXMT_CONFIG; fi
 
-  if [ "$HUD" = 1 ]; then export MTL_HUD_ENABLED=1; else unset MTL_HUD_ENABLED; fi
+  if [ "$HUD" = 1 ] || [ "$GFX_DEBUG" = 1 ]; then export MTL_HUD_ENABLED=1; else unset MTL_HUD_ENABLED; fi
+  if [ "$GFX_DEBUG" = 1 ]; then
+    export MTL_DEBUG_LAYER=1 MTL_DEBUG_LAYER_ERROR_MODE=nslog MTL_DEBUG_LAYER_WARNING_MODE=nslog
+  else
+    unset MTL_DEBUG_LAYER MTL_DEBUG_LAYER_ERROR_MODE MTL_DEBUG_LAYER_WARNING_MODE
+  fi
 }
 
 # DXMT's guide wants winemetal.dll in the bottle as well as in Wine's own folder.
@@ -1157,7 +1221,7 @@ steam_updated_since() {
 
 # $1 = log file for Wine's output
 play() {
-  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game=""
+  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game="" gargs
   need_wine
   other_wine_running && die "CrossOver or another Wine is running. Quit it first."
   if game_running; then
@@ -1185,11 +1249,13 @@ play() {
     fi
   fi
   prepare_prefix
+  gargs="$(game_args)"
+  note_game_args "$gargs"
   cd "$HOME" || true
   if [ "$warm" = 1 ]; then
     say "Steam is still open, so the game starts straight away ($(settings_line))"
     # shellcheck disable=SC2086
-    run_wine "$STEAM_EXE" -applaunch "$APPID" $GAME_ARGS >> "$log" 2>&1 &
+    run_wine "$STEAM_EXE" -applaunch "$APPID" $gargs >> "$log" 2>&1 &
     # An open Steam starts the game within seconds. If it does not, it is not
     # in a state to do so: start again from nothing.
     for i in $(seq 1 "$WARM_WAIT"); do
@@ -1211,7 +1277,7 @@ play() {
     session_sig > "$SESSION"
     start_watchdog "$log"
     # shellcheck disable=SC2086,SC2046
-    run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) -applaunch "$APPID" $GAME_ARGS >> "$log" 2>&1 &
+    run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) -applaunch "$APPID" $gargs >> "$log" 2>&1 &
 
     # Wait for the game to appear: 10 minutes covers a Steam self-update.
     # The times of each stage are kept, for "skywalker.sh timeline".
@@ -1610,6 +1676,7 @@ cmd_doctor() {
   fi
   if bottle_update_due; then echo "Bottle:       still to be updated for this build (the next start does it and takes a few minutes longer, once; or: skywalker.sh update-bottle)"; fi
   echo "Settings:     $(settings_line) hud=$HUD"
+  echo "Game options: from the launcher: $(game_args | sed 's/^$/none/'); from Steam's Launch Options: $(steam_launch_options | sed 's/^$/none/')"
   if [ -f "$DISPLAY_KEEP" ]; then echo "Display:      kept ($(tr '\n' ',' < "$DISPLAY_KEEP" | sed 's/,$//; s/,/, /g'))"; else echo "Display:      as the game writes it (display keep holds it)"; fi
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if [ -f "$AGENT" ]; then echo "Autostart:    on (Steam is started at log-in for $PREWARM_MINUTES minutes)"; else echo "Autostart:    off"; fi
@@ -1656,6 +1723,74 @@ EOF
   echo "$out"
 }
 
+# Runs a command for at most $1 seconds.
+bounded() {
+  local max="$1" pid t=0
+  shift
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$t" -ge "$max" ]; then kill "$pid" 2>/dev/null; echo "(stopped after ${max}s)"; break; fi
+    sleep 1; t=$((t + 1))
+  done
+  wait "$pid" 2>/dev/null || true
+}
+
+game_pid() {
+  local pats
+  pats="$(game_patterns)" || return 1
+  /bin/ps -axww -o pid=,command= | /usr/bin/grep -v -e grep -e 'skywalker\.sh' \
+    | /usr/bin/grep -i -F -e "$pats" | head -n 1 | /usr/bin/awk '{ print $1 }'
+}
+
+# For the moment something is wrong on screen (a black picture, a freeze):
+# everything that can be seen from outside the game, in one file. Reads only.
+cmd_snapshot() {
+  local out pid f secs="${SKY_SNAPSHOT_SECONDS:-5}"
+  load_conf
+  mkdir -p "$LOGS"
+  out="$LOGS/snapshot-$(date +%Y%m%d-%H%M%S).txt"
+  pid="$(game_pid || true)"
+  {
+    echo "== Snapshot $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Build: $(current_tag)   Settings: $(settings_line) hud=$HUD"
+    echo "Launcher started: $(cat "$LOGS/last-start" 2>/dev/null || echo unknown)"
+    echo "Game process: ${pid:-not running}"
+    echo "The game was started as: $(game_cmdline 2>/dev/null || true)"
+    echo
+    echo "== Windows on screen"
+    cmd_windows 2>&1 || true
+    echo
+    echo "== Processor use over $secs seconds"
+    cmd_cpu "$secs" 2>&1 || true
+    echo
+    echo "== The game's screen and window settings"
+    if f="$(pcconfig)"; then display_lines "$f"; else echo "(settings file not found)"; fi
+    echo
+    echo "== Last lines of the run log"
+    f="$(ls -1t "$LOGS"/run-*.log "$LOGS"/bench-*.log 2>/dev/null | head -n 1)"
+    if [ -n "$f" ]; then echo "$f"; tail -n 60 "$f"; else echo "(none)"; fi
+    echo
+    echo "== What the game's threads are doing (3 seconds)"
+    if [ -n "$pid" ] && [ -x /usr/bin/sample ]; then
+      bounded 30 /usr/bin/sample "$pid" 3 -file "$out.sample" > /dev/null 2>&1
+      if [ -f "$out.sample" ]; then head -n 400 "$out.sample"; rm -f "$out.sample"; else echo "(no sample could be taken)"; fi
+    else
+      echo "(not available)"
+    fi
+    echo
+    echo "== The system log of the last 3 minutes, graphics lines of Wine's programs"
+    if [ -x /usr/bin/log ]; then
+      bounded 60 /usr/bin/log show --last 3m --style compact --predicate '(processImagePath CONTAINS[c] "wine") AND (eventMessage CONTAINS[c] "metal" OR eventMessage CONTAINS[c] "D3DM" OR eventMessage CONTAINS[c] "error" OR eventMessage CONTAINS[c] "fail")' 2>&1 | tail -n 200
+    else
+      echo "(not available)"
+    fi
+  } > "$out" 2>&1
+  echo "Written to $out"
+  sed -n '1,5p' "$out"
+  /usr/bin/awk '/^== Windows on screen/ { on = 1 } /^== The game.s screen/ { on = 0 } on && NF' "$out" | head -n 20
+}
+
 cmd_uninstall() {
   local answer
   load_conf
@@ -1692,7 +1827,8 @@ case "${1:-run}" in
   doctor) cmd_doctor ;;
   windows) cmd_windows ;;
   timeline) cmd_timeline ;;
+  snapshot) cmd_snapshot ;;
   wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
-  *) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

@@ -66,6 +66,16 @@ echo "== for information: creating a Direct3D 11 device each way (the CI Mac's g
 run "$OUT/split-game-device.txt" "$IN_GAME" device
 run "$OUT/split-other-device.txt" "$ELSEWHERE" device
 
+echo "== a run with GFX_DEBUG=1 (Apple's Metal validation on): programs still start and load the same"
+/bin/bash "$SKY" stop > /dev/null 2>&1 || true
+SKY_GFX_DEBUG=1 run "$OUT/split-game-gfxdebug.txt" "$IN_GAME"
+expect "$OUT/split-game-gfxdebug.txt" 'd3d11.dll: C:\Program Files (x86)\Steam\steamapps\common\Fake Game\d3d11.dll' "with the checks on, the game still loads its own d3d11.dll"
+expect "$OUT/split-game-gfxdebug.txt" 'winemetal.dll: C:\windows\system32\winemetal.dll' "with the checks on, DXMT still loads"
+echo "  for information, creating a device with the checks on:"
+SKY_GFX_DEBUG=1 run "$OUT/split-game-gfxdebug-device.txt" "$IN_GAME" device
+/usr/bin/grep -i -c -e 'metal' -e 'validation' "$OUT/split-game-gfxdebug-device.txt" | sed 's/^/    lines that mention Metal or validation: /'
+/usr/bin/grep -i -e 'validation' -e 'MTLDebug' "$OUT/split-game-gfxdebug-device.txt" | head -n 5 | sed 's/^/    /'
+
 echo "== wine graphics: nothing of DXMT is left with the game"
 /bin/bash "$SKY" stop > /dev/null 2>&1 || true
 /bin/bash "$SKY" graphics wine || fail=1
