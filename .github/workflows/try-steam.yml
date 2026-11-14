@@ -1,0 +1,72 @@
+name: Try Steam on the runner
+
+# Debugging aid, approved by the repository owner: installs Steam (no sign-in)
+# into a throwaway bottle on the runner, starts it with a published build and
+# keeps screenshots and logs. Each row of the matrix is one set-up to compare.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-steam.yml'
+      - 'scripts/steamtest.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  steam:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # DXMT for everything, as D3DMetal is for everything on a real Mac:
+          # does Steam's browser part load its own copies of Wine's Direct3D,
+          # and does Steam still come up?
+          - name: dxmt-steam-own-d3d
+            runner: macos-15
+            graphics: dxmt
+            own: "1"
+          - name: split
+            runner: macos-15
+            graphics: split
+            own: "1"
+    env:
+      TAG: wine-cx-26.3.0-patched-7
+      GRAPHICS: ${{ matrix.graphics }}
+      SKY_STEAM_OWN_D3D: ${{ matrix.own }}
+      TRACE: fixme-all
+      FIRST_TRACE: fixme-all
+      MINUTES: "2"
+      # one start of Steam per line, timed up to the sign-in screen
+      ROUNDS: |-
+
+        +trace:+pid,+loaddll,fixme-all
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the build with the launcher
+        run: |
+          sw_vers; uname -m
+          if /usr/bin/arch -x86_64 /usr/bin/true 2>/dev/null; then echo "Intel programs run here"; else echo "No Rosetta on this runner"; fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+
+      - name: Install Steam, start it and watch the screen
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          export STEAMTEST_OUT="$PWD/steam-logs"
+          /bin/bash scripts/steamtest.sh "$MINUTES"
+
+      - name: Upload the logs and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: steam-logs-${{ matrix.name }}
+          path: steam-logs
+          if-no-files-found: ignore
+          retention-days: 5

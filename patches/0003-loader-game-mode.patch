@@ -1,0 +1,21 @@
+loader: Declare Wine programs as games to macOS.
+
+macOS gives a full-screen game more of the processor and graphics chip and
+holds back background work (Game Mode), but only for programs that say they
+are games. Untested: whether macOS honours this for Wine's windows.
+
+--- a/loader/wine_info.plist.in
++++ b/loader/wine_info.plist.in
+@@ -22,6 +22,12 @@
+     <string>????</string>
+     <key>CFBundleVersion</key>
+     <string>@PACKAGE_VERSION@</string>
++    <key>LSApplicationCategoryType</key>
++    <string>public.app-category.games</string>
++    <key>LSSupportsGameMode</key>
++    <true/>
++    <key>GCSupportsGameMode</key>
++    <true/>
+     <key>NSPrincipalClass</key>
+     <string>WineApplication</string>
+     <key>LSUIElement</key>

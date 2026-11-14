@@ -1,0 +1,38 @@
+name: Check for a new CrossOver source release
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'   # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compare the newest source version with our releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          listing=$(curl -fsSL --retry 3 https://media.codeweavers.com/pub/crossover/source/) || {
+            echo "::warning::Could not read CodeWeavers' source listing"
+            exit 0
+          }
+          newest=$(printf '%s' "$listing" | grep -oE 'crossover-sources-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' \
+            | sed -E 's/crossover-sources-(.*)\.tar\.gz/\1/' | sort -Vu | tail -n 1)
+          if [ -z "$newest" ]; then
+            echo "::warning::No source versions found in the listing"
+            exit 0
+          fi
+          echo "Newest CrossOver source: $newest"
+          if gh release list --limit 200 --json tagName --jq '.[].tagName' | grep -q "^wine-cx-${newest}-"; then
+            echo "A release for $newest already exists."
+            exit 0
+          fi
+          echo "No release for $newest yet; starting a build."
+          # A pre-release: it has not been tried on a Mac, so the installer's "latest" must not pick it up.
+          gh workflow run build.yml --ref main -f cx_version="$newest" -f prerelease=true

@@ -3,7 +3,11 @@ name: Build CrossOver Wine (macOS)
 on:
   push:
     branches: [main]
-    paths: ['.github/workflows/**', 'patches/**']
+    paths:
+      - '.github/workflows/build.yml'
+      - 'patches/**'
+      - 'scripts/bundle-dylibs.sh'
+      - 'sources.lock'
   workflow_dispatch:
     inputs:
       cx_version:
@@ -13,32 +17,68 @@ on:
         description: Apply the patches in patches/
         type: boolean
         default: false
+      prerelease:
+        description: Publish as a pre-release (the installer's "latest" skips it)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   build:
-    # Intel runner: Wine for macOS is an x86_64 build that runs under Rosetta on Apple silicon
+    # Intel runner: Wine for macOS is an x86_64 build that runs under Rosetta on Apple silicon.
+    # GitHub retires this runner in fall 2027; the build has to cross-compile after that.
     runs-on: macos-15-intel
     timeout-minutes: 300
     env:
       CX_VERSION: ${{ inputs.cx_version || '26.3.0' }}
+      DXMT_VERSION: v0.80
+      DXMT_SHA256: 8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d
       PREFIX: ${{ github.workspace }}/install
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
-          brew install bison flex pkgconf mingw-w64 freetype gnutls molten-vk sdl2 gettext
+          brew install bison flex pkgconf mingw-w64 freetype gnutls molten-vk sdl2 gettext ccache
           echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
           echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Route the compilers through ccache
+        run: |
+          # ccache, called under a compiler's name, runs the next program of that name on PATH
+          mkdir -p "$RUNNER_TEMP/ccbin"
+          for c in cc gcc clang x86_64-w64-mingw32-gcc i686-w64-mingw32-gcc; do
+            ln -sf "$(command -v ccache)" "$RUNNER_TEMP/ccbin/$c"
+          done
+          echo "$RUNNER_TEMP/ccbin" >> "$GITHUB_PATH"
+
+      - name: Restore the compile cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.CX_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ env.CX_VERSION }}-
 
       - name: Download CrossOver sources
         run: |
           curl -fL --retry 3 -o cx.tar.gz \
             "https://media.codeweavers.com/pub/crossover/source/crossover-sources-${CX_VERSION}.tar.gz"
-          shasum -a 256 cx.tar.gz | tee cx.tar.gz.sha256
+          sum=$(shasum -a 256 cx.tar.gz | awk '{print $1}')
+          want=$(awk -v v="$CX_VERSION" '$1 == v {print $2}' sources.lock)
+          if [ -n "$want" ] && [ "$sum" != "$want" ]; then
+            echo "::error::crossover-sources-${CX_VERSION}.tar.gz has checksum $sum, but sources.lock pins $want"
+            exit 1
+          fi
+          if [ -z "$want" ]; then
+            echo "::warning::sources.lock has no checksum for ${CX_VERSION}; this download has $sum"
+          fi
+          echo "$sum  cx.tar.gz" > cx.tar.gz.sha256
           tar xf cx.tar.gz
           ls sources
 
@@ -55,6 +95,7 @@ jobs:
 
       - name: Configure
         run: |
+          ccache --zero-stats
           mkdir build && cd build
           ../sources/wine/configure \
             --prefix="$PREFIX" \
@@ -67,34 +108,129 @@ jobs:
           tail -n 40 config.log | grep -i 'warn' || true
 
       - name: Build
+        id: build
         working-directory: build
-        run: make -j"$(sysctl -n hw.ncpu)"
+        run: |
+          make -j"$(sysctl -n hw.ncpu)"
+          ccache --show-stats
 
-      - name: Install and package
+      # Saved straight after compiling, so a failure in a later step does not cost the next run an hour.
+      - name: Save the compile cache
+        if: ${{ always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure') }}
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ env.CX_VERSION }}-${{ github.run_id }}
+
+      - name: Install
         working-directory: build
         run: |
           make install-lib
           # strip debug info from the Windows-side DLLs, as shipped builds do
           find "$PREFIX/lib/wine" \( -name '*.dll' -o -name '*.exe' -o -name '*.sys' -o -name '*.drv' \) -print0 | \
             xargs -0 -n 50 x86_64-w64-mingw32-strip --strip-debug 2>/dev/null || true
-          cd "$GITHUB_WORKSPACE"
-          name="wine-cx-${CX_VERSION}${{ inputs.apply_patches == true && '-patched' || '' }}"
+
+      - name: Bundle the run-time libraries
+        run: bash scripts/bundle-dylibs.sh "$PREFIX"
+
+      - name: Bundle DXMT
+        run: |
+          curl -fL --retry 3 -o dxmt.tar.gz \
+            "https://github.com/3Shain/dxmt/releases/download/${DXMT_VERSION}/dxmt-${DXMT_VERSION}-builtin.tar.gz"
+          echo "${DXMT_SHA256}  dxmt.tar.gz" | shasum -a 256 -c -
+          mkdir dxmt && tar -xzf dxmt.tar.gz -C dxmt
+          # DXMT's builtin DLLs replace Wine's own; Wine's copies are kept in orig-dlls
+          for arch in x86_64-windows i386-windows x86_64-unix; do
+            mkdir -p "$PREFIX/orig-dlls/$arch"
+            for f in "dxmt/${DXMT_VERSION}/$arch"/*; do
+              b=$(basename "$f")
+              dst="$PREFIX/lib/wine/$arch/$b"
+              if [ -e "$dst" ]; then cp "$dst" "$PREFIX/orig-dlls/$arch/"; fi
+              cp "$f" "$dst"
+            done
+          done
+          test -f "$PREFIX/lib/wine/x86_64-unix/winemetal.so"
+
+      - name: Describe the build
+        run: |
+          patched=0
+          if [ "${{ inputs.apply_patches == true }}" = "true" ]; then patched=1; fi
+          {
+            echo "CX_VERSION=${CX_VERSION}"
+            echo "DXMT_VERSION=${DXMT_VERSION}"
+            echo "PATCHED=${patched}"
+            echo "COMMIT=${GITHUB_SHA}"
+            echo "BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > "$PREFIX/BUILD-INFO"
+          if [ "$patched" = 1 ]; then ls patches/*.patch | sed 's|.*/|PATCH=|' >> "$PREFIX/BUILD-INFO"; fi
+          cat "$PREFIX/BUILD-INFO"
+          echo "PATCHED=$patched" >> "$GITHUB_ENV"
+
+      - name: Package
+        run: |
+          name="wine-cx-${CX_VERSION}"
+          if [ "$PATCHED" = 1 ]; then name="$name-patched"; fi
+          tag="${name}-${GITHUB_RUN_NUMBER}"
           tar -cJf "$name.tar.xz" -C "$PREFIX" .
           shasum -a 256 "$name.tar.xz" > "$name.tar.xz.sha256"
+          {
+            echo "TAG=$tag"
+            echo "ASSET=$name.tar.xz"
+            echo "SHA256=$(awk '{print $1}' "$name.tar.xz.sha256")"
+            echo "CX_VERSION=${CX_VERSION}"
+            echo "DXMT_VERSION=${DXMT_VERSION}"
+            echo "PATCHED=${PATCHED}"
+          } > manifest.env
+          cat manifest.env
+          ls -l "$name.tar.xz"
           echo "PKG=$name" >> "$GITHUB_ENV"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      # Kept for a week, so a build that fails the self-test can still be downloaded and studied.
+      - name: Keep the package with the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: |
+            ${{ env.PKG }}.tar.xz
+            ${{ env.PKG }}.tar.xz.sha256
+            manifest.env
+          retention-days: 7
+          compression-level: 0
+
+      - name: Self-test from a different folder
+        run: |
+          # The package has to work away from the build tree and without Homebrew,
+          # so test what was packaged, unpacked somewhere else.
+          mkdir -p "$RUNNER_TEMP/relocated"
+          tar -xJf "$PKG.tar.xz" -C "$RUNNER_TEMP/relocated"
+          bash scripts/selftest.sh "$RUNNER_TEMP/relocated" 240
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${PKG}-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" "$PKG.tar.xz" "$PKG.tar.xz.sha256" cx.tar.gz.sha256 \
-            --title "$tag" \
-            --notes "Wine from CodeWeavers' published CrossOver ${CX_VERSION} open-source sources (LGPL), built on GitHub's macOS runner. Contains no CrossOver application code and no D3DMetal."
+          # Only a plain build from main becomes the "latest" release that the installer follows.
+          pre=""
+          if [ "$PATCHED" = 1 ] || [ "$GITHUB_REF" != "refs/heads/main" ] || [ "${{ inputs.prerelease == true }}" = "true" ]; then
+            pre="--prerelease"
+          fi
+          # The workflow's token may not create a tag on a commit that changes workflow
+          # files and is not on main yet, so only builds of main are tagged at their own
+          # commit. Other builds are tagged at main; BUILD-INFO and the notes name the commit.
+          target=""
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then target="--target $GITHUB_SHA"; fi
+          gh release create "$TAG" "$PKG.tar.xz" "$PKG.tar.xz.sha256" manifest.env cx.tar.gz.sha256 \
+            $target $pre \
+            --title "$TAG" \
+            --notes "Wine from CodeWeavers' published CrossOver ${CX_VERSION} open-source sources (LGPL), built on GitHub's macOS runner, with DXMT ${DXMT_VERSION} in place of Wine's own Direct3D 10/11 (Wine's copies are in orig-dlls). lib/ holds the Homebrew builds of FreeType, GnuTLS, SDL2 and their dependencies (no Vulkan), each under its own licence. Contains no CrossOver application code and no D3DMetal. Start it with DYLD_FALLBACK_LIBRARY_PATH set to the lib folder; scripts/skywalker.sh does that. Built from commit ${GITHUB_SHA} (${GITHUB_REF_NAME})."
 
-      - name: Upload build log on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: config-log
-          path: build/config.log
+          name: build-logs
+          path: |
+            build/config.log
+            selftest-logs
+          if-no-files-found: ignore

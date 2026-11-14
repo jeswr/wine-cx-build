@@ -1,0 +1,162 @@
+name: Try a release on the runner
+
+# Downloads a published release and runs scripts/selftest.sh on it. This takes
+# a few minutes, where a full build takes over an hour, so it is the quick way
+# to find out why a build does not start.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-release.yml'
+      - 'scripts/selftest.sh'
+      - 'scripts/bundle-dylibs.sh'
+      - 'scripts/skywalker.sh'
+      - 'scripts/test-guards.sh'
+      - 'scripts/test-split.sh'
+      - 'scripts/test-d3dmetal-install.sh'
+      - 'scripts/test-autostart.sh'
+      - 'scripts/d3dtest.c'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        default: "wine-cx-26.3.0-5"
+      asset:
+        description: Package file name in that release
+        default: "wine-cx-26.3.0.tar.xz"
+
+permissions:
+  contents: read
+
+jobs:
+  try:
+    runs-on: macos-15-intel
+    timeout-minutes: 40
+    env:
+      TAG: ${{ inputs.tag || 'wine-cx-26.3.0-patched-7' }}
+      ASSET: ${{ inputs.asset || 'wine-cx-26.3.0-patched.tar.xz' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the release
+        run: |
+          curl -fL --retry 3 -o pkg.tar.xz "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET}"
+          mkdir -p "$RUNNER_TEMP/wine"
+          tar -xJf pkg.tar.xz -C "$RUNNER_TEMP/wine"
+          ls "$RUNNER_TEMP/wine"
+          cat "$RUNNER_TEMP/wine/BUILD-INFO" 2>/dev/null || true
+
+      - name: Add the run-time libraries if the release has none
+        run: |
+          if [ ! -e "$RUNNER_TEMP/wine/lib/libfreetype.6.dylib" ]; then
+            brew install freetype gnutls molten-vk sdl2
+            bash scripts/bundle-dylibs.sh "$RUNNER_TEMP/wine"
+          fi
+
+      - name: Self-test
+        run: bash scripts/selftest.sh "$RUNNER_TEMP/wine" 60
+
+      # Only releases made by the current build workflow carry a manifest for the launcher.
+      - name: Install and start it with the launcher
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then
+            echo "Release ${TAG} has no manifest.env; skipping the launcher check."
+            exit 0
+          fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+          /bin/bash scripts/skywalker.sh doctor
+          # no bottle on this machine, so Wine makes a new one; give it a deadline
+          /bin/bash "$SKYWALKER_HOME/skywalker.sh" wine cmd /c "echo launcher-ok" > launcher.out 2> launcher.err &
+          pid=$!
+          t=0
+          while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 240 ]; do sleep 5; t=$((t + 5)); done
+          if kill -0 "$pid" 2>/dev/null; then echo "Wine did not finish within ${t}s"; fi
+          /bin/bash "$SKYWALKER_HOME/skywalker.sh" stop || true
+          kill -9 "$pid" 2>/dev/null || true
+          cat launcher.out
+          tail -n 20 launcher.err || true
+          grep -q 'launcher-ok' launcher.out
+
+      # "Wine runs but shows nothing" was the fault on the Mac, so check that
+      # a window really reaches the screen, and keep a picture of it.
+      - name: Open a Wine window and look for it on screen
+        run: |
+          if [ ! -x "$RUNNER_TEMP/sky/skywalker.sh" ]; then
+            echo "The launcher was not installed; skipping."
+            exit 0
+          fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          mkdir -p selftest-logs
+          L="$SKYWALKER_HOME/skywalker.sh"
+          WINEDEBUG=fixme-all /bin/bash "$L" wine notepad > selftest-logs/notepad.log 2>&1 &
+          found=0
+          t=0
+          while [ "$t" -lt 120 ]; do
+            sleep 5; t=$((t + 5))
+            if /bin/bash "$L" windows > selftest-logs/windows.txt 2>&1; then
+              # a real window, not a 1x1 helper
+              if awk -F '\t' '{ split($2, d, "x"); if (d[1] >= 200 && d[2] >= 100) ok = 1 } END { exit !ok }' selftest-logs/windows.txt; then
+                found=1; break
+              fi
+            fi
+          done
+          echo "After ${t}s:"; cat selftest-logs/windows.txt
+          sleep 3
+          screencapture -x selftest-logs/screen.png || echo "screencapture failed"
+          /bin/bash "$L" doctor | grep -E 'Processes|Wine running'
+          /bin/bash "$L" stop
+          /bin/bash "$L" doctor | grep -E 'Processes|Wine running'
+          tail -n 20 selftest-logs/notepad.log || true
+          if [ "$found" != 1 ]; then echo "No Wine window appeared on screen."; exit 1; fi
+          if /bin/bash "$L" doctor | grep -q 'Processes:    0 from Wine'; then :; else echo "stop left Wine processes behind"; exit 1; fi
+
+      - name: Crash-loop guards
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          brew install mingw-w64
+          printf 'int main(void){ *(volatile int *)0 = 0; return 0; }\n' > crash.c
+          x86_64-w64-mingw32-gcc -O0 -o crash.exe crash.c
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
+          bash scripts/test-guards.sh "$PWD/crash.exe"
+
+      - name: Split graphics (DXMT for the game only)
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          command -v x86_64-w64-mingw32-gcc > /dev/null || brew install mingw-w64
+          x86_64-w64-mingw32-gcc -O1 -o d3dtest.exe scripts/d3dtest.c
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG" > /dev/null
+          bash scripts/test-split.sh "$PWD/d3dtest.exe"
+
+      # Apple's D3DMetal cannot be used on the runner, so stand-in files with the
+      # same names and layout take its place: this is a dry run of the launcher's
+      # file handling for "graphics d3dmetal" and of the update that keeps it.
+      - name: Steam started at log-in (a stand-in for Steam)
+        run: |
+          if [ ! -x "$RUNNER_TEMP/sky/skywalker.sh" ]; then echo "The launcher was not installed; skipping."; exit 0; fi
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/test-autostart.sh
+
+      - name: D3DMetal mode and the update that keeps it (stand-in files)
+        run: |
+          if ! curl -fsSL -o /dev/null "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/manifest.env"; then exit 0; fi
+          if [ "$TAG" = wine-cx-26.3.0-patched-6 ]; then echo "The dry run updates from patched-6, so it needs another tag."; exit 0; fi
+          /bin/bash "$RUNNER_TEMP/sky/skywalker.sh" stop || true
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky-d3dm" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker D3DMetal.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix" SKY_GPTK_DIR="$RUNNER_TEMP/gptk"
+          /bin/bash scripts/test-d3dmetal-install.sh "$TAG"
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-logs
+          path: selftest-logs
+          if-no-files-found: ignore
