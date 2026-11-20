@@ -1,0 +1,44 @@
+name: Try the controller setup on the runner
+
+# Checks the PlayStation controller setup (scripts/test-controller.sh) with a
+# published release in a few minutes. No controller is attached to the runner.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-controller.yml'
+      - 'scripts/test-controller.sh'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        default: "wine-cx-26.3.0-patched-7"
+
+permissions:
+  contents: read
+
+jobs:
+  try:
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    env:
+      TAG: ${{ inputs.tag || 'wine-cx-26.3.0-patched-7' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the release with the launcher
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+      - name: Controller setup
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          bash scripts/test-controller.sh
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: controller-logs
+          path: selftest-logs
+          if-no-files-found: ignore
