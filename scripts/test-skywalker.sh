@@ -60,7 +60,7 @@ bash -n "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app's sc
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_APP/Contents/Info.plist"; fi
 [ -s "$SKYWALKER_APP/Contents/Resources/loading.js" ] || fail "the app has no loading window"
 grep -q 'function run(argv)' "$SKYWALKER_APP/Contents/Resources/loading.js" || fail "the loading window script is cut short"
-grep -q 'loading.js" "$D/logs" "$start"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app does not show the loading window"
+grep -q '"$J" "$D/logs" "$start"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app does not show the loading window"
 if grep -q LSUIElement "$SKYWALKER_APP/Contents/Info.plist"; then fail "the app hides from the Dock, so its loading window would have no icon"; fi
 if command -v node >/dev/null 2>&1; then node --check "$SKYWALKER_APP/Contents/Resources/loading.js" || fail "the loading window script does not parse"; fi
 # an app made by an older launcher is brought up to date by "launch"

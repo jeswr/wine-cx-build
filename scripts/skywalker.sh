@@ -1200,11 +1200,14 @@ D="\$(dirname "\$L")"
 R="\$(cd "\$(dirname "\$0")/../Resources" && pwd)"
 mkdir -p "\$D/logs"
 start="\$(date +%s)"
+# a copy of the window's script: "launch" may replace this app with a newer one
+J="\${TMPDIR:-/tmp}/skywalker-loading.js"
+cp "\$R/loading.js" "\$J" 2>/dev/null || J="\$R/loading.js"
 # "launch" hands the start to macOS as a job of its own and returns: what an app
 # starts is ended with the app, and the game and Steam must outlive this script.
 /bin/bash "\$L" launch >> "\$D/logs/launcher.log" 2>&1
-if [ -f "\$R/loading.js" ] && [ -z "\${SKYWALKER_NO_WINDOW:-}" ]; then
-  exec /usr/bin/osascript -l JavaScript "\$R/loading.js" "\$D/logs" "\$start" "\$R/AppIcon.icns" >> "\$D/logs/loading.log" 2>&1
+if [ -f "\$J" ] && [ -z "\${SKYWALKER_NO_WINDOW:-}" ]; then
+  exec /usr/bin/osascript -l JavaScript "\$J" "\$D/logs" "\$start" "\$R/AppIcon.icns" >> "\$D/logs/loading.log" 2>&1
 fi
 EOF
   chmod +x "$a/Contents/MacOS/skywalker-launcher.new"
