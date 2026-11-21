@@ -1,0 +1,62 @@
+name: Try Steam kept ready (paused)
+
+# "skywalker.sh ready on" with real Steam (no sign-in) on a runner: the log-in
+# item starts Steam, it is paused at its sign-in screen, uses no processor time
+# while paused, still answers once woken, and stop and "ready off" clean up.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-ready.yml'
+      - 'scripts/steamtest.sh'
+      - 'scripts/skywalker.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ready:
+    name: ready-${{ matrix.graphics }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        graphics: [split, dxmt]
+    env:
+      TAG: wine-cx-26.3.0-patched-7
+      GRAPHICS: ${{ matrix.graphics }}
+      READY_TEST: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the build with the launcher
+        run: |
+          sw_vers; uname -m
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+
+      - name: Install Steam, keep it ready, wake it
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          export STEAMTEST_OUT="$PWD/steam-logs"
+          /bin/bash scripts/steamtest.sh 1
+
+      - name: Clean up
+        if: always()
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh ready off || true
+          /bin/bash scripts/skywalker.sh stop || true
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ready-logs-${{ matrix.graphics }}
+          path: steam-logs
+          if-no-files-found: ignore
+          retention-days: 5

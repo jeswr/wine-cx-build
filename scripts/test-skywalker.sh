@@ -482,6 +482,73 @@ C:\\Program Files (x86)\\Steam\\steam.exe -foo -cef-disable-gpu" ] || { cat "$FA
 bash "$S" stop > /dev/null
 [ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
 
+echo "-- Steam kept ready but paused"
+bash "$S" stop > /dev/null 2>&1 || true
+: > "$FAKE_DIR/calls.txt"
+had_launcher=0; [ -f "$SKYWALKER_HOME/skywalker.sh" ] && had_launcher=1
+cp "$S" "$SKYWALKER_HOME/skywalker.sh.ready-test"; mv "$SKYWALKER_HOME/skywalker.sh.ready-test" "$SKYWALKER_HOME/skywalker.sh"
+stat_of() { ps -o stat= -p "$(cat "$FAKE_DIR/$1.pid" 2>/dev/null)" 2>/dev/null | tr -d ' '; }
+is_paused() { case "$(stat_of "$1")" in T*) return 0 ;; *) return 1 ;; esac; }
+SKY_LAUNCHCTL="$T/fakebin/launchctl" bash "$S" ready on | tee "$T/ready1.txt"
+[ -f "$SKYWALKER_HOME/steam.ready" ] || fail "ready on left no mark"
+[ -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail "ready on did not set up the start at log-in"
+bash "$S" ready status | grep -q '^Ready: on' || fail "ready status does not say on"
+# after a game Steam is paused, not closed
+SKY_PAUSE_AFTER_GAME=1 bash "$S" run | tee "$T/ready-run1.txt"
+grep -q 'Steam is paused in 1 seconds' "$T/ready-run1.txt" || fail "the pause after the game was not announced"
+sleep 3
+steam_alive || fail "Steam was closed instead of paused"
+is_paused steam || fail "Steam was not paused after the game (state $(stat_of steam))"
+is_paused server || fail "wineserver was not paused (state $(stat_of server))"
+bash "$S" ready status | grep -q 'Steam paused since' || fail "ready status does not show the pause"
+bash "$S" doctor > "$T/ready-doctor.txt" 2>&1 || true
+grep -q 'Ready: *on (Steam paused' "$T/ready-doctor.txt" || fail "doctor does not show the pause"
+# the next start wakes it and the open Steam starts the game
+SKY_PAUSE_AFTER_GAME=30 bash "$S" run | tee "$T/ready-run2.txt"
+grep -q 'it is running again' "$T/ready-run2.txt" || fail "the paused Steam was not woken"
+grep -q 'Steam is still open, so the game starts straight away' "$T/ready-run2.txt" || fail "the woken Steam was not used"
+grep -q 'Waking Steam' "$SKYWALKER_HOME/logs/start-stages.txt" || fail "the loading window was not told about waking Steam"
+[ "$(grep -c -e '-silent' "$FAKE_DIR/calls.txt")" = 1 ] || fail "Steam was started again instead of woken"
+[ "$(grep -c -e '-applaunch 920210' "$FAKE_DIR/calls.txt")" = 2 ] || fail "expected two game launches"
+if is_paused steam; then fail "Steam is still paused after the second game"; fi
+# stop works on a paused Steam
+bash "$S" pause-steam > /dev/null
+is_paused steam || fail "pause did not pause Steam"
+bash "$S" stop > /dev/null
+sleep 1
+if steam_alive; then fail "stop left a paused Steam behind"; fi
+[ ! -f "$SKYWALKER_HOME/steam-paused" ] || fail "the pause note was left behind"
+# at log-in: Steam starts, signs in, and is paused once it has settled
+rm -f "$STEAM/logs/console_log.txt" "$STEAM/logs/steamui_login.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm | tee "$T/ready-prewarm.txt"
+grep -q 'once it has signed in it is paused' "$T/ready-prewarm.txt" || fail "prewarm did not say it pauses Steam"
+sleep 1
+steam_alive || fail "prewarm did not start Steam"
+sleep 6
+if is_paused steam; then fail "Steam was paused before it had signed in"; fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] System startup time: 30.12 seconds" >> "$STEAM/logs/console_log.txt"
+i=0; while ! is_paused steam && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+is_paused steam || fail "Steam was not paused once signed in"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > "$T/ready-prewarm2.txt"
+grep -q 'Steam is ready (paused)' "$T/ready-prewarm2.txt" || fail "prewarm does not see the paused Steam"
+# the sign-in screen counts as settled too (Steam cannot sign in by itself)
+bash "$S" stop > /dev/null
+rm -f "$STEAM/logs/console_log.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > /dev/null
+sleep 2
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] SteamUI: WaitingForCredentials - OK" >> "$STEAM/logs/steamui_login.txt"
+i=0; while ! is_paused steam && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+is_paused steam || fail "Steam was not paused at its sign-in screen"
+# off: Steam is woken and closes after the usual time
+SKY_LAUNCHCTL="$T/fakebin/launchctl" SKY_KEEP_STEAM_MINUTES=0.05 bash "$S" ready off | tee "$T/ready-off.txt"
+[ ! -f "$SKYWALKER_HOME/steam.ready" ] || fail "ready off left the mark"
+[ ! -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail "ready off left the start at log-in"
+if is_paused steam; then fail "ready off did not wake Steam"; fi
+sleep 7
+if steam_alive; then fail "Steam stayed open after ready off"; fi
+bash "$S" ready status | grep -q '^Ready: off' || fail "ready status does not say off"
+[ "$had_launcher" = 1 ] || rm -f "$SKYWALKER_HOME/skywalker.sh"
+
 echo "-- an open Steam that cannot start the game, and leftovers of a Steam that has gone"
 : > "$FAKE_DIR/calls.txt"
 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/args0.txt"

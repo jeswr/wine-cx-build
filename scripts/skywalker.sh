@@ -31,6 +31,10 @@
 #                                PREWARM_MINUTES (or the minutes given) if the game is not played
 #   skywalker.sh autostart on|off
 #                                on: do that prewarm by itself every time you log in to the Mac
+#   skywalker.sh ready on|off    on: keep Steam ready but paused. Steam starts at log-in, signs in
+#                                and is then paused (no processor, no battery; its memory stays);
+#                                a click on the game resumes it and the game starts in seconds.
+#                                After a game Steam is paused again instead of closed.
 #   skywalker.sh cpu [seconds]   measure how much processor time Wine's programs use (troubleshooting)
 #   skywalker.sh pause           pause the game mid-level: hide it and freeze it (and Steam and Wine)
 #                                where it is, using no processor time; survives the Mac sleeping,
@@ -167,10 +171,11 @@ load_conf() {
   : "${PROC_HEADROOM:=400}" "${KEEP_STEAM_MINUTES:=30}" "${STEAM_GPU:=0}"
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
   : "${GAME_ARGS=-skipvideos}" "${GFX_DEBUG:=0}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
+  : "${PAUSE_AFTER_GAME:=90}" "${PAUSE_AFTER_READY:=30}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
   : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window|MonitorIndex)?|AspectRatio)\$}"
   : "${REFIT:=1}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D GFX_DEBUG REFIT; do
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D GFX_DEBUG REFIT PAUSE_AFTER_GAME PAUSE_AFTER_READY; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -344,6 +349,7 @@ limit_processes() {
 # Starts Wine with that limit on Wine alone, so that the launcher can still
 # run its own checks if the limit is ever reached.
 run_wine() {
+  resume_wine > /dev/null
   ( limit_processes; exec "$CUR/bin/wine" "$@" )
 }
 
@@ -1824,6 +1830,7 @@ steam_d3d_reg() {
   } > "$reg"
   mkdir -p "$LOGS"
   wine_env
+  resume_wine > /dev/null
   ( limit_processes; exec "$CUR/bin/wine" regedit /S 'C:\skywalker-steam-d3d.reg' ) >> "$LOGS/steam-d3d.log" 2>&1 &
   pid=$!
   while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 120 ]; do sleep 1; t=$((t + 1)); done
@@ -2119,6 +2126,119 @@ start_watchdog() {
 # not the ones of this run. SESSION records what the open Steam was started
 # with, so that a start with other settings restarts Steam first.
 SESSION="$HOME_DIR/steam-session"
+READY_MARK="$HOME_DIR/steam.ready"   # "ready on": keep Steam paused rather than closed
+PAUSED="$HOME_DIR/steam-paused"      # Steam's programs are paused now (since the time inside)
+GAME_PAUSED="$HOME_DIR/paused"       # the game itself is paused mid-level ("pause"): leave Wine alone
+
+# ---------------------------------------------------------------- Steam kept ready, paused
+#
+# A paused program (SIGSTOP) keeps its memory but gets no processor time at
+# all, so a signed-in Steam can wait for days at no cost in battery. Resuming
+# (SIGCONT) is instant; Steam then reconnects to its servers, as after the Mac
+# has slept. Every way into Wine (run_wine, play, stop) resumes first.
+
+pause_wanted() { [ -f "$READY_MARK" ]; }
+
+# Pauses all of this build's Wine programs (Steam, its browser parts, the
+# Windows background programs and wineserver). Not while the game runs.
+pause_wine() {
+  local pids
+  game_running && return 1
+  [ -f "$GAME_PAUSED" ] && return 1
+  pids="$(wine_pids)"
+  [ -n "$pids" ] || return 1
+  date '+%Y-%m-%d %H:%M:%S' > "$PAUSED"
+  # shellcheck disable=SC2086
+  kill -STOP $pids 2>/dev/null || true
+  return 0
+}
+
+# Resumes them (quietly when nothing was paused). Also wakes any Wine program
+# left paused by an earlier launcher that did not get to resume it. While the
+# game is paused mid-level nothing is woken, unless $1 is "all" (closing Wine).
+resume_wine() {
+  local pids was=""
+  if [ "${1:-}" != all ] && [ -f "$GAME_PAUSED" ]; then return 0; fi
+  [ -f "$PAUSED" ] && was="$(cat "$PAUSED" 2>/dev/null)"
+  rm -f "$PAUSED"
+  pids="$(wine_pids)"
+  # shellcheck disable=SC2086
+  if [ -n "$pids" ]; then kill -CONT $pids 2>/dev/null || true; fi
+  if [ -n "$was" ] && [ -n "$pids" ]; then say "Steam was kept ready (paused since ${was#* }); it is running again."; fi
+  return 0
+}
+
+wine_paused() {
+  local pids
+  [ -f "$PAUSED" ] || return 1
+  pids="$(wine_pids)"
+  [ -n "$pids" ] || { rm -f "$PAUSED"; return 1; }
+  # shellcheck disable=SC2086
+  /bin/ps -o stat= -p "$(echo $pids | tr ' ' ',')" 2>/dev/null | /usr/bin/grep -q T
+}
+
+# Whether Steam has finished starting since the time given: signed in, or
+# showing its sign-in window because it cannot sign in by itself.
+steam_settled() {
+  [ "$(steam_stage "$1" 2>/dev/null)" = ready ] && return 0
+  /usr/bin/awk -v s="[$1]" 'substr($0, 1, 21) >= s && /WaitingForCredentials - OK/ { found = 1 } END { exit !found }' \
+    "$(steam_dir)/logs/steamui_login.txt" 2>/dev/null
+}
+
+# In the background: once Steam has settled (at most 10 minutes), wait
+# PAUSE_AFTER_READY seconds more and pause it, unless a game has started or
+# another timer has taken over (the same ticket as the idle timer).
+# $1 = start time ("2026-11-21 15:42:17")
+start_pause_when_ready() {
+  local since="$1" ticket
+  ticket="$(date +%s)-$$-$RANDOM"
+  echo "$ticket" > "$IDLE"
+  (
+    trap '' HUP
+    i=0
+    while [ "$i" -lt 600 ]; do
+      sleep 5; i=$((i + 5))
+      [ "$(cat "$IDLE" 2>/dev/null)" = "$ticket" ] || exit 0
+      game_running && exit 0
+      steam_settled "$since" && break
+    done
+    sleep "$PAUSE_AFTER_READY"
+    [ "$(cat "$IDLE" 2>/dev/null)" = "$ticket" ] || exit 0
+    rm -f "$IDLE"
+    pause_wine
+  ) </dev/null >/dev/null 2>&1 &
+}
+
+cmd_ready() {
+  load_conf
+  case "${1:-status}" in
+    on)
+      [ -x "$LAUNCHCTL" ] || die "This needs macOS."
+      touch "$READY_MARK"
+      cmd_autostart on > /dev/null
+      say "Steam is now kept ready: it starts when you log in (and now), signs in, and is then paused."
+      say "Paused, it uses no processor or battery; a click on the game resumes it. After a game it is paused again."
+      say "To undo: bash $HOME_DIR/skywalker.sh ready off"
+      ;;
+    off)
+      rm -f "$READY_MARK"
+      cmd_autostart off > /dev/null
+      wine_env
+      resume_wine
+      rm -f "$IDLE"
+      if our_wineserver_running; then start_idle_timer "$(keep_seconds)"; fi
+      say "Steam is no longer kept ready. Starts are as before (a Steam open now closes after $KEEP_STEAM_MINUTES minutes)."
+      ;;
+    status)
+      if pause_wanted; then
+        if wine_paused; then echo "Ready: on (Steam paused since $(cat "$PAUSED"))"; else echo "Ready: on (Steam is not paused right now)"; fi
+      else
+        echo "Ready: off"
+      fi
+      ;;
+    *) die "Use: skywalker.sh ready on|off" ;;
+  esac
+}
 IDLE="$HOME_DIR/steam-idle"
 session_sig() {
   echo "$(current_tag) $(settings_line) hud=$HUD hudlog=${MTL_HUD_LOG_ENABLED:-0} debug=${WINEDEBUG:-}"
@@ -2138,13 +2258,13 @@ start_idle_timer() {
     [ "$(cat "$IDLE" 2>/dev/null)" = "$ticket" ] || exit 0
     game_running && exit 0
     rm -f "$IDLE"
-    shutdown_wine
+    if pause_wanted; then pause_wine; else shutdown_wine; fi
   ) </dev/null >/dev/null 2>&1 &
 }
 
 shutdown_wine() {
   local i
-  resume_wine all   # a frozen Steam or server would never answer
+  resume_wine all > /dev/null
   rm -f "$SESSION" "$IDLE"
   if steam_running; then
     say "Closing Steam"
@@ -2269,6 +2389,11 @@ play() {
   : > "$LOGS/start-stages.txt"
   date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
   rm -f "$IDLE"
+  if wine_paused; then
+    ui_status starting "Waking Steam"
+    resume_wine
+    sleep 1
+  fi
   ui_status starting "Backing up your saves"
   backup_saves
   ui_status starting "Fitting the game to your screen"
@@ -2383,6 +2508,12 @@ play() {
   ui_status "done" "The game has closed."
   say "The game has exited."
   keep="$(keep_seconds)"
+  if pause_wanted && steam_running; then
+    backup_saves
+    start_idle_timer "$PAUSE_AFTER_GAME"
+    say "Steam is paused in $PAUSE_AFTER_GAME seconds (after it has uploaded your saves), ready for the next start."
+    return 0
+  fi
   if [ "$keep" -gt 0 ] && steam_running; then
     backup_saves
     start_idle_timer "$keep"
@@ -2443,8 +2574,15 @@ cmd_prewarm() {
   secs="$(/usr/bin/awk -v m="$mins" 'BEGIN { printf "%d", m * 60 }')"
   if our_wineserver_running && steam_running; then
     if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
-      if [ "$secs" -gt 0 ]; then start_idle_timer "$secs"; else rm -f "$IDLE"; fi
-      say "Steam is already open, so the next start of the game is quick."
+      if wine_paused; then
+        say "Steam is ready (paused), so the next start of the game is quick."
+      elif pause_wanted; then
+        start_idle_timer "$PAUSE_AFTER_READY"
+        say "Steam is already open; it is paused in $PAUSE_AFTER_READY seconds, ready for the game."
+      else
+        if [ "$secs" -gt 0 ]; then start_idle_timer "$secs"; else rm -f "$IDLE"; fi
+        say "Steam is already open, so the next start of the game is quick."
+      fi
       return 0
     fi
     say "Steam is open with other settings, so it is restarted."
@@ -2459,7 +2597,10 @@ cmd_prewarm() {
   start_watchdog "$log"
   # shellcheck disable=SC2086,SC2046
   run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) >> "$log" 2>&1 &
-  if [ "$secs" -gt 0 ]; then
+  if pause_wanted; then
+    start_pause_when_ready "$(date '+%Y-%m-%d %H:%M:%S')"
+    say "Steam is starting in the background; once it has signed in it is paused, ready for the game. To close it: bash $HOME_DIR/skywalker.sh stop"
+  elif [ "$secs" -gt 0 ]; then
     start_idle_timer "$secs"
     say "Steam is starting in the background. It closes again in $mins minutes if the game is not played. To close it now: bash $HOME_DIR/skywalker.sh stop"
   else
@@ -2541,6 +2682,7 @@ cmd_launch() {
   refresh_app || true
   me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
   if game_paused; then
+    UI_T0="$(date +%s)"   # the loading window hears of it, and closes once the game's window is back
     ui_status running "Carrying on with the paused game"
     cmd_resume
     return 0
@@ -2813,7 +2955,9 @@ cmd_doctor() {
   esac
   if [ -d "$APP" ]; then echo "App:          $APP$( [ -f "$APP/Contents/Resources/AppIcon.icns" ] && echo ' (with the game icon)')"; else echo "App:          missing (skywalker.sh app)"; fi
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
-  if [ -f "$AGENT" ]; then echo "Autostart:    on (Steam is started at log-in for $PREWARM_MINUTES minutes)"; else echo "Autostart:    off"; fi
+  if pause_wanted; then
+    if wine_paused; then echo "Ready:        on (Steam paused since $(cat "$PAUSED"))"; else echo "Ready:        on (Steam started at log-in and paused once signed in)"; fi
+  elif [ -f "$AGENT" ]; then echo "Autostart:    on (Steam is started at log-in for $PREWARM_MINUTES minutes)"; else echo "Autostart:    off"; fi
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
   echo "Processes:    $(count_wine_procs) from Wine, $(/bin/ps -x -o pid= | /usr/bin/wc -l | /usr/bin/tr -d ' ') in all, limit $(ulimit -u) (Wine is held to $PROC_HEADROOM more than are running)"
   if game_running; then echo "Game running: yes"; else echo "Game running: no"; fi
@@ -2934,7 +3078,6 @@ cmd_snapshot() {
 # icon thaws them in one go and brings the game back. A paused game survives
 # the Mac sleeping (closing the lid), but not a restart, a shutdown or a
 # log-out: those end every program, frozen or not.
-GAME_PAUSED="$HOME_DIR/paused"   # the note: since=, game=, screen= (the Steam freeze leaves Wine alone while it exists)
 PAUSE_APP="${SKYWALKER_PAUSE_APP:-$(dirname "$APP")/Skywalker Pause.app}"
 PAUSE_ID=local.skywalker-saga.pause
 
@@ -3287,12 +3430,6 @@ dock_pin_pause() {
   say "The Pause app is in the Dock, next to the game."
 }
 
-# TEMPORARY until the Steam-freeze section lands: thaw every Wine program.
-resume_wine() {
-  local p
-  for p in $(wine_pids); do kill -CONT "$p" 2>/dev/null || true; done
-}
-
 cmd_uninstall() {
   local answer
   load_conf
@@ -3318,6 +3455,8 @@ case "${1:-run}" in
   update-bottle) load_conf; need_wine; update_bottle ;;   # what install does after switching builds
   run) cmd_run ;;
   launch) cmd_launch ;;   # what the app runs
+  ready) shift; cmd_ready "${1:-status}" ;;
+  pause-steam) load_conf; wine_env; if pause_wine; then say "Steam is paused."; else say "Nothing to pause."; fi ;;
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
   pause) cmd_pause ;;
@@ -3339,7 +3478,7 @@ case "${1:-run}" in
   windows) cmd_windows ;;
   timeline) cmd_timeline ;;
   snapshot) cmd_snapshot ;;
-  wine) shift; load_conf; need_wine; wine_env; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
+  wine) shift; load_conf; need_wine; wine_env; resume_wine > /dev/null; mkdir -p "$LOGS"; start_watchdog "$LOGS/watchdog.log"; limit_processes; exec "$CUR/bin/wine" "$@" ;;
   uninstall) cmd_uninstall ;;
   *) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
