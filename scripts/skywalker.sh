@@ -2120,6 +2120,7 @@ SESSION="$HOME_DIR/steam-session"
 READY_MARK="$HOME_DIR/steam.ready"   # "ready on": keep Steam paused rather than closed
 PAUSED="$HOME_DIR/steam-paused"      # Steam's programs are paused now (since the time inside)
 GAME_PAUSED="$HOME_DIR/paused"       # the game itself is paused mid-level ("pause"): leave Wine alone
+STEAM_STARTED="$HOME_DIR/steam-started"  # when prewarm last started Steam
 
 # ---------------------------------------------------------------- Steam kept ready, paused
 #
@@ -2206,7 +2207,16 @@ cmd_ready() {
     on)
       [ -x "$LAUNCHCTL" ] || die "This needs macOS."
       touch "$READY_MARK"
-      cmd_autostart on > /dev/null
+      # the log-in item takes effect at the next log-in; for now, start Steam
+      # from here (on the cloud Macs, Steam started by launchd stalls)
+      cmd_autostart on later > /dev/null
+      if game_running; then
+        :
+      elif wine_paused; then
+        say "Steam is already paused and ready."
+      else
+        cmd_prewarm
+      fi
       say "Steam is now kept ready: it starts when you log in (and now), signs in, and is then paused."
       say "Paused, it uses no processor or battery; a click on the game resumes it. After a game it is paused again."
       say "To undo: bash $HOME_DIR/skywalker.sh ready off"
@@ -2569,8 +2579,8 @@ cmd_prewarm() {
       if wine_paused; then
         say "Steam is ready (paused), so the next start of the game is quick."
       elif pause_wanted; then
-        start_idle_timer "$PAUSE_AFTER_READY"
-        say "Steam is already open; it is paused in $PAUSE_AFTER_READY seconds, ready for the game."
+        start_pause_when_ready "$(cat "$STEAM_STARTED" 2>/dev/null || date '+%Y-%m-%d %H:%M:%S')"
+        say "Steam is already open; once it has signed in it is paused, ready for the game."
       else
         if [ "$secs" -gt 0 ]; then start_idle_timer "$secs"; else rm -f "$IDLE"; fi
         say "Steam is already open, so the next start of the game is quick."
@@ -2586,11 +2596,12 @@ cmd_prewarm() {
   : > "$log"
   note_bottle_update
   session_sig > "$SESSION"
+  date '+%Y-%m-%d %H:%M:%S' > "$STEAM_STARTED"
   start_watchdog "$log"
   # shellcheck disable=SC2086,SC2046
   run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) >> "$log" 2>&1 &
   if pause_wanted; then
-    start_pause_when_ready "$(date '+%Y-%m-%d %H:%M:%S')"
+    start_pause_when_ready "$(cat "$STEAM_STARTED")"
     say "Steam is starting in the background; once it has signed in it is paused, ready for the game. To close it: bash $HOME_DIR/skywalker.sh stop"
   elif [ "$secs" -gt 0 ]; then
     start_idle_timer "$secs"
@@ -2645,6 +2656,8 @@ cmd_autostart() {
 </plist>
 EOF
       "$LAUNCHCTL" bootout "$dom/$AGENT_LABEL" >/dev/null 2>&1 || true
+      # "later": macOS loads it at the next log-in; nothing is started now
+      [ "${2:-}" = later ] && return 0
       "$LAUNCHCTL" bootstrap "$dom" "$AGENT" || { rm -f "$AGENT"; die "macOS did not accept the log-in item."; }
       say "Steam is now started in the background at every log-in (and right now), for $PREWARM_MINUTES minutes each time."
       say "To undo: bash $HOME_DIR/skywalker.sh autostart off"

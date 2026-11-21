@@ -234,9 +234,11 @@ ready_test() {
   echo "PAUSE_AFTER_READY=20" >> "$SKYWALKER_HOME/config.env"
   rm -f "$STEAM_DIR"/logs/*.txt
 
-  # A: "ready on" (without registering the log-in item), then prewarm as the log-in item would
-  note "ready on, then prewarm from the shell"
-  SKY_LAUNCHCTL=/usr/bin/true /bin/bash "$L" ready on
+  # A: "ready on" starts Steam from the shell (the log-in item waits for the next log-in)
+  note "ready on"
+  /bin/bash "$L" ready on
+  [ -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail_r "ready on wrote no log-in item"
+  # a second prewarm while Steam is still starting must not pause it early
   /bin/bash "$L" prewarm
   if ! wait_paused prewarm 300; then
     fail_r "Steam started by prewarm was not paused within 300 s"
@@ -300,8 +302,8 @@ ready_test() {
 
   # B: the real log-in item (launchd starts prewarm)
   rm -f "$STEAM_DIR"/logs/*.txt "$SKYWALKER_HOME"/logs/prewarm.log "$SKYWALKER_HOME"/logs/autostart.log
-  note "ready on with the real log-in item"
-  /bin/bash "$L" ready on
+  note "the log-in item, started now by launchd"
+  /bin/bash "$L" autostart on
   if wait_paused login-item 240; then
     note "the log-in item's Steam was paused"
   else
