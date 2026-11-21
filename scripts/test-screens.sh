@@ -124,7 +124,7 @@ for a in "$OLD" "$CXAPP"; do
   u="$(/usr/bin/osascript -l JavaScript -e 'function run(a){ return $.NSURL.fileURLWithPathIsDirectory(a[0], true).absoluteString.js }' "$a")"
   defaults write com.apple.dock persistent-apps -array-add "<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>$u</string><key>_CFURLStringType</key><integer>15</integer></dict></dict><key>tile-type</key><string>file-tile</string></dict>"
 done
-killall Dock 2>/dev/null; sleep 3
+killall Dock 2>/dev/null; sleep 6
 defaults export com.apple.dock "$OUT/dock-seeded.plist"
 /bin/bash "$SKY" app > "$OUT/app.txt" 2>&1
 cat "$OUT/app.txt" | sed 's/^/  /'
@@ -156,13 +156,19 @@ screencapture -x "$OUT/dock.png" || true
 # the app starts the launcher through the home folder, as it would on another Mac
 mkdir -p "$HOME/Games/skywalker"
 if [ ! -e "$HOME/Games/skywalker/skywalker.sh" ]; then
-  # like the real launcher, it leaves something running (Steam) after it returns
-  printf '#!/bin/bash\necho "$@" > "%s/app-ran.txt"\n( sleep 8; echo alive > "%s/app-child.txt" ) &\n' "$OUT" "$OUT" > "$HOME/Games/skywalker/skywalker.sh"
+  # the real launcher, with "run" standing in: it notes that it ran and, like the
+  # real one, leaves something running (Steam) after it returns
+  sed "s|^  run) cmd_run ;;|  run) echo run > '$OUT/app-ran.txt'; ( sleep 8; echo alive > '$OUT/app-child.txt' ) \\& ;;|" "$SKY" > "$HOME/Games/skywalker/skywalker.sh"
+  grep -q 'app-ran' "$HOME/Games/skywalker/skywalker.sh" || bad "the stand-in run was not put in"
   open "$SKYWALKER_APP" > "$OUT/open.txt" 2>&1; echo "  open: exit $? $(cat "$OUT/open.txt")"
   wait_for 20 test -s "$OUT/app-ran.txt" && ok "opening the app runs: skywalker.sh $(cat "$OUT/app-ran.txt")" || bad "opening the app did not run the launcher"
   wait_for 20 test -s "$OUT/app-child.txt" && ok "what the launcher leaves running outlives the app" || bad "macOS ended what the launcher left running"
   cat "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null | sed 's/^/  launcher.log: /'
   log show --last 2m --style compact --predicate 'eventMessage CONTAINS[c] "skywalker"' 2>/dev/null | tail -n 25 | sed 's/^/  log: /'
+  open "$SKYWALKER_APP"; sleep 3
+  grep -q 'already starting or running' "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null && echo "  (a second click while it ran was ignored)"
+  launchctl print "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null | grep -E 'state|last exit' | sed 's/^/  job: /'
+  launchctl bootout "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null || true
   rm -f "$HOME/Games/skywalker/skywalker.sh"
 fi
 defaults import com.apple.dock "$OUT/dock-before-seed.plist"; killall Dock 2>/dev/null || true

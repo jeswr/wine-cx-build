@@ -52,7 +52,7 @@ bash "$S" backup
 echo "-- app icon"
 SKYWALKER_NO_DOCK=1 bash "$S" app
 [ -x "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" ] || fail "launcher missing from the app"
-grep -q '"$L" run' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not call run"
+grep -q '"$L" launch' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not call launch"
 grep -q 'L="${L:-$HOME/Games/skywalker/skywalker.sh}"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not find the launcher through the home folder"
 bash -n "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app's script is broken"
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_APP/Contents/Info.plist"; fi
@@ -578,6 +578,13 @@ grep -q 'Autostart:    on' "$T/auto-doctor.txt" || fail "doctor does not show au
 bash "$S" autostart off > /dev/null
 [ ! -f "$PL" ] || fail "autostart off left the log-in item"
 grep -q "bootout gui/$(id -u)/io.github.jeswr.skywalker.prewarm" "$FAKE_DIR/launchctl.txt" || fail "macOS was not told to drop the log-in item"
+echo "-- the app hands the start to a macOS job of its own"
+bash "$SKYWALKER_HOME/skywalker.sh" launch > "$T/launch.txt"
+grep -q "bootstrap gui/$(id -u) $SKYWALKER_HOME/run-job.plist" "$FAKE_DIR/launchctl.txt" || fail "the start was not handed to macOS"
+grep -q '<string>run</string>' "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the game"
+grep -q "<string>$SKYWALKER_HOME/skywalker.sh</string>" "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the installed launcher"
+grep -q '<key>AbandonProcessGroup</key><true/>' "$SKYWALKER_HOME/run-job.plist" || fail "the job would take the game down with it"
+if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_HOME/run-job.plist"; fi
 rm -f "$SKYWALKER_HOME/skywalker.sh"
 
 echo "-- the game is fitted to the screen it opens on"

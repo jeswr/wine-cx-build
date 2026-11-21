@@ -1142,7 +1142,7 @@ create_app() {
 EOF
   cat > "$APP.new/Contents/MacOS/skywalker-launcher" <<EOF
 #!/bin/bash
-# Starts the game in the background and returns at once, so the icon does not sit bouncing.
+# Starts the game and returns at once, so the icon does not sit bouncing.
 L="\${SKYWALKER_HOME:+\$SKYWALKER_HOME/skywalker.sh}"
 L="\${L:-$launcher_path}"
 if [ ! -f "\$L" ]; then
@@ -1150,7 +1150,9 @@ if [ ! -f "\$L" ]; then
   exit 1
 fi
 mkdir -p "\$(dirname "\$L")/logs"
-/usr/bin/nohup /bin/bash "\$L" run >> "\$(dirname "\$L")/logs/launcher.log" 2>&1 &
+# "launch" hands the start to macOS as a job of its own and returns: what an app
+# starts is ended with the app, and the game and Steam must outlive this script.
+exec /bin/bash "\$L" launch >> "\$(dirname "\$L")/logs/launcher.log" 2>&1
 EOF
   chmod +x "$APP.new/Contents/MacOS/skywalker-launcher"
   # swap in the new app in one step, so a Dock icon pointing at it stays valid
@@ -1161,6 +1163,12 @@ EOF
   touch "$APP"
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" > /dev/null 2>&1 || true
   say "App: $APP (Spotlight and Launchpad find it as \"Skywalker Saga\")"
+}
+
+# $1 = exported Dock settings, $2 = text: how many Dock icons have it in their address
+dock_count() {
+  /usr/libexec/PlistBuddy -c 'Print :persistent-apps' "$1" 2>/dev/null | /usr/bin/grep -a '_CFURLString = ' \
+    | /usr/bin/grep -a -i -c -F "$2" || true
 }
 
 # Puts the app in the Dock, where an older game icon was if there was one,
@@ -1219,9 +1227,19 @@ dock_pin() {
       -c "Add :persistent-apps:$n:tile-data:file-data:_CFURLStringType integer 15" \
       "$plist" || die "Could not add the app to the Dock's settings."
   fi
-  /usr/bin/defaults import com.apple.dock "$plist" || die "Could not save the Dock's settings."
-  rm -f "$plist"
-  /usr/bin/killall Dock 2>/dev/null || true
+  # The Dock keeps its own copy while it runs and can write it back over a
+  # change made at the wrong moment (while it is starting), so check and retry.
+  for i in 1 2 3; do
+    /usr/bin/defaults import com.apple.dock "$plist" || die "Could not save the Dock's settings."
+    /usr/bin/killall Dock 2>/dev/null || true
+    sleep 3
+    /usr/bin/defaults export com.apple.dock "$plist.check" 2>/dev/null || true
+    if dock_count "$plist.check" skywalker | grep -qx 1 && dock_count "$plist.check" "$url" | grep -qx 1; then
+      at=ok; break
+    fi
+  done
+  rm -f "$plist" "$plist.check"
+  [ "$at" = ok ] || die "The Dock did not take the change. Try again: bash $HOME_DIR/skywalker.sh dock"
   say "The game is in the Dock${removed:+ (replaced: ${removed#, })}. To take it out: drag it out of the Dock."
 }
 
@@ -2032,6 +2050,56 @@ EOF
   esac
 }
 
+RUN_LABEL="io.github.jeswr.skywalker.run"
+
+# What the app does: starts "run" as a macOS job of its own and returns. An app's
+# own process is short-lived here, and macOS ends whatever it started when it
+# ends; a job of its own (AbandonProcessGroup) lets the game, Steam and the
+# screen watcher carry on. A second click while the job runs changes nothing.
+cmd_launch() {
+  local dom plist="$HOME_DIR/run-job.plist" me
+  load_conf
+  mkdir -p "$LOGS"
+  me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  if [ ! -x "$LAUNCHCTL" ]; then exec /bin/bash "$me" run; fi
+  dom="gui/$(id -u)"
+  if "$LAUNCHCTL" print "$dom/$RUN_LABEL" 2>/dev/null | /usr/bin/grep -q 'state = running'; then
+    say "$(date '+%H:%M:%S') The game is already starting or running."
+    return 0
+  fi
+  cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$RUN_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$(xml_text "$me")</string>
+    <string>run</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SKYWALKER_HOME</key><string>$(xml_text "$HOME_DIR")</string>
+    <key>SKYWALKER_APP</key><string>$(xml_text "$APP")</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>AbandonProcessGroup</key><true/>
+  <key>StandardOutPath</key><string>$(xml_text "$LOGS/launcher.log")</string>
+  <key>StandardErrorPath</key><string>$(xml_text "$LOGS/launcher.log")</string>
+</dict>
+</plist>
+EOF
+  "$LAUNCHCTL" bootout "$dom/$RUN_LABEL" >/dev/null 2>&1 || true
+  if ! "$LAUNCHCTL" bootstrap "$dom" "$plist"; then
+    say "macOS did not take the start as a job, so it runs here."
+    exec /bin/bash "$me" run
+  fi
+  say "$(date '+%H:%M:%S') Started (as macOS job $RUN_LABEL)."
+}
+
 # One line per Wine program: process id, processor seconds used so far, name.
 cpu_snapshot() {
   /bin/ps -x -o pid=,time=,command= | /usr/bin/awk -v w="$WINES/" '{
@@ -2378,6 +2446,7 @@ cmd_uninstall() {
   read -r answer
   [ "$answer" = yes ] || { echo "Nothing removed."; return 0; }
   if [ -f "$AGENT" ]; then cmd_autostart off; fi
+  if [ -x "$LAUNCHCTL" ]; then "$LAUNCHCTL" bootout "gui/$(id -u)/$RUN_LABEL" >/dev/null 2>&1 || true; fi
   case "$APP" in */"Skywalker Saga.app") rm -rf "$APP" ;; esac
   case "$HOME_DIR" in */skywalker) rm -rf "$HOME_DIR" ;; esac
   echo "Removed."
@@ -2391,6 +2460,7 @@ case "${1:-run}" in
   adopt-graphics) shift; load_conf; need_wine; adopt_graphics "${1:-none}" ;;   # used by the tests
   update-bottle) load_conf; need_wine; update_bottle ;;   # what install does after switching builds
   run) cmd_run ;;
+  launch) cmd_launch ;;   # what the app runs
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
   prewarm) shift; cmd_prewarm "${1:-}" ;;
