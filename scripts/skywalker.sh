@@ -615,7 +615,8 @@ function run(argv) {
   while (t < max) {
     delay(every);
     t += every;
-    if ($.getppid() !== parent) return;
+    var p = $.getppid();
+    if (p !== parent || p === 1) return;   // the launcher has gone
     var now = line(false);
     if (key(now) === seen) { pending = ''; continue; }
     // the same new state twice in a row: the change has settled
@@ -1033,14 +1034,17 @@ function round(src, dest) {
     null, S, S, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
   var ctx = $.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);
   $.NSGraphicsContext.saveGraphicsState;
-  $.NSGraphicsContext.currentContext = ctx;
-  ctx.imageInterpolation = $.NSImageInterpolationHigh;
+  $.NSGraphicsContext.setCurrentContext(ctx);
+  ctx.setImageInterpolation($.NSImageInterpolationHigh);
   // Apple's app icon grid: an 824-point rounded square in the middle of 1024
   var r = $.NSMakeRect(100, 100, 824, 824);
   $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius(r, 185, 185).addClip;
   img.drawInRectFromRectOperationFraction(r, $.NSZeroRect, $.NSCompositingOperationSourceOver, 1);
   ctx.flushGraphics;
   $.NSGraphicsContext.restoreGraphicsState;
+  // nothing drawn (the middle is see-through): let the caller use the picture as it is
+  var mid = rep.colorAtXY(512, 512);
+  if (!mid || mid.isNil() || mid.alphaComponent < 0.5) throw 'the rounded icon came out empty';
   var png = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
   if (!png.writeToFileAtomically(dest, true)) throw 'cannot write ' + dest;
   return 'ok';
@@ -1087,7 +1091,7 @@ make_icns() {
   case "$got" in [0-9]*x[0-9]*) ;; *) echo "icon: $got"; rm -rf "$tmp"; return 1 ;; esac
   /usr/bin/sips -s format png "$tmp/game.ico" --out "$tmp/game.png" > /dev/null 2>&1 || { echo "icon: sips could not read it"; rm -rf "$tmp"; return 1; }
   case "$(bounded_quiet 60 /usr/bin/osascript -l JavaScript "$js" round "$tmp/game.png" "$tmp/icon1024.png" 2>&1)" in
-    ok) ;; *) cp "$tmp/game.png" "$tmp/icon1024.png" ;;
+    ok) ;; *) /usr/bin/sips -z 1024 1024 "$tmp/game.png" --out "$tmp/icon1024.png" > /dev/null 2>&1 ;;
   esac
   for s in 16 32 128 256 512; do
     /usr/bin/sips -z "$s" "$s" "$tmp/icon1024.png" --out "$tmp/AppIcon.iconset/icon_${s}x${s}.png" > /dev/null 2>&1

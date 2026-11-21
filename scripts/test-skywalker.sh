@@ -615,12 +615,14 @@ cp "$CFG" "$T/before-nomeasure.txt"
 SKY_SCREEN_LINE='garbage' bash "$S" display check > "$T/fit3.txt" || true
 cmp -s "$CFG" "$T/before-nomeasure.txt" || fail "the file was changed without a measurement"
 if [ "$(uname -s)" != Darwin ]; then
-  bash "$S" display check | grep -q 'Could not measure the screen' || fail "no word when the screen cannot be measured"
+  bash "$S" display check > "$T/fit-nom.txt"; grep -q 'Could not measure the screen' "$T/fit-nom.txt" || fail "no word when the screen cannot be measured"
 fi
 n="$(find "$SKYWALKER_HOME/settings-backups" -name 'PCCONFIG-*.TXT' | wc -l | tr -d ' ')"
 [ "$n" -ge 4 ] || fail "not every fit was backed up first ($n)"
-SKY_SCREEN_LINE="$PROJ" bash "$S" display screen | grep -q '   ScreenHeight 1080' || fail "display screen does not show what the game would get"
-SKY_SCREEN_LINE="$PROJ" bash "$S" doctor | grep -q 'Display:      auto' || fail "doctor does not show auto"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display screen > "$T/fit-screen.txt"
+grep -q '   ScreenHeight 1080' "$T/fit-screen.txt" || fail "display screen does not show what the game would get"
+SKY_SCREEN_LINE="$PROJ" bash "$S" doctor > "$T/fit-doctor.txt"
+grep -q 'Display:      auto' "$T/fit-doctor.txt" || fail "doctor does not show auto"
 # a start fits too, and the old "display keep" alone still means keep
 cp "$T/good.txt" "$CFG"
 SKY_SCREEN_LINE="$PROJ" SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/fit-run.txt"
@@ -660,7 +662,8 @@ grep -q "screen settings had changed and were put back" "$T/disp-run.txt" || fai
 cmp -s "$CFG" "$T/want.txt" || fail "run left the drifted screen settings"
 # an install from before display.mode: display.keep alone means keep
 rm -f "$SKYWALKER_HOME/display.mode"
-bash "$S" display show | grep -q '^Way:     keep' || fail "an old display.keep is not honoured"
+bash "$S" display show > "$T/disp-old.txt"
+grep -q '^Way:     keep' "$T/disp-old.txt" || fail "an old display.keep is not honoured"
 bash "$S" display off > /dev/null
 cp "$T/drift.txt" "$CFG"
 bash "$S" display check
