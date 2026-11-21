@@ -1,0 +1,75 @@
+name: Try pausing the game
+
+# "skywalker.sh pause" / "resume" / the Pause app on CI Macs with a real build.
+# The game cannot run here: pausegame.exe stands in for it (Direct3D 11 every
+# frame and a sound playing), and must carry on after being frozen for a while.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-pause.yml'
+      - 'scripts/skywalker.sh'
+      - 'scripts/pausegame.c'
+      - 'scripts/test-pause.sh'
+      - 'scripts/skykey.c'
+      - 'scripts/postkey.swift'
+      - 'scripts/skyhotkey.swift'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  try:
+    name: ${{ matrix.runner }} (held ${{ matrix.hold }} s)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            hold: 300
+          - runner: macos-latest
+            hold: 120
+    env:
+      TAG: wine-cx-26.3.0-patched-7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the stand-in game
+        run: |
+          sw_vers; uname -m
+          brew install mingw-w64 > /dev/null
+          x86_64-w64-mingw32-gcc -O1 -Wall -mwindows -o pausegame.exe scripts/pausegame.c -ld3d11 -ldxgi -lwinmm -luuid -lgdi32
+          x86_64-w64-mingw32-gcc -O1 -Wall -o skykey.exe scripts/skykey.c
+          swiftc -O -target arm64-apple-macos13 -o skyhotkey scripts/skyhotkey.swift
+          ls -la pausegame.exe skykey.exe skyhotkey; file skyhotkey; codesign -dv skyhotkey 2>&1 | head -3
+
+      - name: Install the build with the launcher, as on the Mac, and make a bottle
+        run: |
+          /bin/bash scripts/skywalker.sh install "$TAG"
+          L="$HOME/Games/skywalker/skywalker.sh"
+          /bin/bash "$L" wine cmd /c "echo bottle-ok" > bottle.out 2>&1 &
+          pid=$!
+          t=0
+          while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 300 ]; do sleep 5; t=$((t + 5)); done
+          /bin/bash "$L" stop || true
+          kill -9 "$pid" 2>/dev/null || true
+          grep -q bottle-ok bottle.out
+
+      - name: Pause, hold, resume
+        timeout-minutes: 30
+        run: /bin/bash scripts/test-pause.sh "$PWD/pausegame.exe" "${{ matrix.hold }}" "$PWD/skykey.exe" "$PWD/skyhotkey"
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pause-${{ matrix.runner }}
+          path: |
+            selftest-logs
+            skykey.exe
+            skyhotkey
+            ~/Games/skywalker/logs
+          if-no-files-found: ignore

@@ -36,6 +36,18 @@
 #                                a click on the game resumes it and the game starts in seconds.
 #                                After a game Steam is paused again instead of closed.
 #   skywalker.sh cpu [seconds]   measure how much processor time Wine's programs use (troubleshooting)
+#   skywalker.sh pause           pause the game mid-level: hide it and freeze it (and Steam and Wine)
+#                                where it is, using no processor time; survives the Mac sleeping,
+#                                not a restart or shutdown
+#   skywalker.sh resume          carry on with a paused game (clicking the game's icon does this too)
+#   skywalker.sh toggle-pause    pause or resume, whichever fits (what the Pause app runs)
+#   skywalker.sh hotkey [keys|off|pad on|pad off]
+#                                the key combination that pauses and resumes while the game runs:
+#                                ctrl-option-p unless set otherwise; it opens the game's own pause
+#                                menu (Esc) before freezing it. No permission needed. pad on: the
+#                                controller's Options and Create buttons pressed together do the same
+#   skywalker.sh pause-app       make the Pause app (game icon with a pause sign) and put it in the
+#                                Dock next to the game; Spotlight finds it too: Cmd-Space, "pause"
 #   skywalker.sh stop            shut down Steam and Wine
 #   skywalker.sh doctor          show what is installed and what is missing
 #   skywalker.sh wine <args>     run any Wine program with the launcher's settings (troubleshooting)
@@ -776,6 +788,7 @@ watch_game() {
   fi
   while game_running; do
     sleep 3
+    [ -f "$GAME_PAUSED" ] && continue   # paused: fitted once it is resumed, if the screen changed
     [ -f "$SCREEN_WATCH_PID" ] || continue
     line="$(tail -n 1 "$ev" 2>/dev/null)"
     case "$line" in main=*) ;; *) continue ;; esac
@@ -1566,7 +1579,7 @@ dock_pin() {
     u="$(/usr/libexec/PlistBuddy -c "Print :persistent-apps:$i:tile-data:file-data:_CFURLString" "$plist" 2>/dev/null)" || u=""
     if [ "$u" = "$url" ] && [ "$keep" = 0 ]; then
       keep=1
-    elif printf '%s' "$u" | /usr/bin/grep -qi 'skywalker'; then
+    elif printf '%s' "$u" | /usr/bin/grep -i 'skywalker' | /usr/bin/grep -qvi 'pause'; then
       rm_list="$i $rm_list"
       [ -n "$at" ] || at="$i"
       removed="$removed, $(printf '%s' "$u" | sed 's|/$||; s|.*/||; s|%20| |g; s|%C2%AE||g; s|%E2%84%A2||g')"
@@ -1606,7 +1619,7 @@ dock_pin() {
     /usr/bin/killall Dock 2>/dev/null || true
     sleep 3
     /usr/bin/defaults export com.apple.dock "$plist.check" 2>/dev/null || true
-    if dock_count "$plist.check" skywalker | grep -qx 1 && dock_count "$plist.check" "$url" | grep -qx 1; then
+    if [ "$(( $(dock_count "$plist.check" skywalker) - $(dock_count "$plist.check" 'skywalker%20pause') ))" = 1 ] && dock_count "$plist.check" "$url" | grep -qx 1; then
       at=ok; break
     fi
   done
@@ -2081,6 +2094,7 @@ count_wine_procs() { wine_pids | /usr/bin/wc -l | /usr/bin/tr -d ' '; }
 
 # The watchdog's way of stopping Wine: everything, at once.
 kill_all_wine() {
+  resume_wine all   # a frozen server would never answer -k
   "$CUR/bin/wineserver" -k >/dev/null 2>&1 || true
   sleep 1
   /usr/bin/pkill -9 -f '^[A-Za-z]:\\' 2>/dev/null || true
@@ -2377,6 +2391,11 @@ play() {
   UI_EXPECT="$(expected_start cold)"
   need_wine
   other_wine_running && die "CrossOver or another Wine is running. Quit it first."
+  if game_paused; then
+    ui_status running "Carrying on with the paused game"
+    cmd_resume
+    return 0
+  fi
   if game_running; then
     ui_status running "The game is already running"
     say "The game is already running."
@@ -2506,7 +2525,9 @@ play() {
     say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
     if steam_updated_since "$(cat "$LOGS/last-start")"; then say "Steam updated itself during this start, which is why it took longer than usual."; fi
   fi
+  hotkey_start
   watch_game "$log"
+  hotkey_stop
   ui_status "done" "The game has closed."
   say "The game has exited."
   keep="$(keep_seconds)"
@@ -2686,6 +2707,12 @@ cmd_launch() {
   mkdir -p "$LOGS"
   refresh_app || true
   me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  if game_paused; then
+    UI_T0="$(date +%s)"   # the loading window hears of it, and closes once the game's window is back
+    ui_status running "Carrying on with the paused game"
+    cmd_resume
+    return 0
+  fi
   if [ ! -x "$LAUNCHCTL" ]; then exec /bin/bash "$me" run; fi
   dom="gui/$(id -u)"
   if "$LAUNCHCTL" print "$dom/$RUN_LABEL" 2>/dev/null | /usr/bin/grep -q 'state = running'; then
@@ -2773,6 +2800,7 @@ cmd_stop() {
   need_wine
   wine_env
   screen_watch_stop
+  hotkey_stop
   shutdown_wine
   say "Stopped."
 }
@@ -3068,6 +3096,495 @@ cmd_snapshot() {
   /usr/bin/awk '/^== Windows on screen/ { on = 1 } /^== The game.s screen/ { on = 0 } on && NF' "$out" | head -n 20
 }
 
+# ---------------------------------------------------------------- pause in the middle of a level
+# The game saves only at its own checkpoints. "pause" keeps it exactly where it
+# is: the game's windows are hidden, then macOS freezes every Wine program (the
+# game, Steam and Wine's own server) with SIGSTOP. A frozen program uses no
+# processor and no battery; its memory stays, and macOS compresses it or moves
+# it to disk if other apps need the room. "resume", the Pause app or the game's
+# icon thaws them in one go and brings the game back. A paused game survives
+# the Mac sleeping (closing the lid), but not a restart, a shutdown or a
+# log-out: those end every program, frozen or not.
+PAUSE_APP="${SKYWALKER_PAUSE_APP:-$(dirname "$APP")/Skywalker Pause.app}"
+PAUSE_ID=local.skywalker-saga.pause
+
+pause_js() {
+  local f="$HOME_DIR/lib/pause.js"
+  mkdir -p "$HOME_DIR/lib"
+  cat > "$f.new" <<'EOF'
+// Hides and shows Wine's programs for "skywalker.sh pause".
+// Run with: osascript -l JavaScript pause.js <command> ...
+//   hide PID...          hide each of these that has windows; one line "hidden PID" each
+//   show PID...          show them again and bring the first to the front; last line front=yes|no
+//   info PID...          "PID hidden=0|1 active=0|1" for each that has windows, then front=PID
+//   badge IN.icns OUT    OUT = a 1024x1024 PNG: the icon IN with a pause sign on it
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+
+function out(s) {
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData($(s + '\n').dataUsingEncoding($.NSUTF8StringEncoding));
+}
+// lets AppKit hear about changes (hidden, frontmost) for a moment
+function settle(secs) {
+  $.NSRunLoop.currentRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(secs));
+}
+function apps(pids) {
+  var r = [];
+  pids.forEach(function (p) {
+    var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(p, 10));
+    if (a && !a.isNil()) r.push({ pid: p, app: a });
+  });
+  return r;
+}
+function frontPid() {
+  var f = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+  return (f && !f.isNil()) ? f.processIdentifier : 0;
+}
+
+function hide(pids) {
+  apps(pids).forEach(function (x) {
+    if (x.app.hide) out('hidden ' + x.pid);
+  });
+  settle(0.5);
+}
+
+function show(pids) {
+  var list = apps(pids), i, first = null;
+  list.forEach(function (x) { x.app.unhide; });
+  for (i = 0; i < list.length; i++) if (String(list[i].pid) === String(pids[0])) first = list[i].app;
+  if (!first) { out('front=no (no window)'); return; }
+  var me = $.NSApplication.sharedApplication;
+  if (me.respondsToSelector('yieldActivationToApplication:')) me.yieldActivationToApplication(first);
+  // 1 = all windows, 2 = ignoring other apps (older macOS needs it; newer ignores it)
+  first.activateWithOptions(3);
+  for (i = 0; i < 20; i++) {
+    settle(0.1);
+    if (String(frontPid()) === String(pids[0])) { out('front=yes'); return; }
+  }
+  out('front=no (frontmost: ' + frontPid() + ')');
+}
+
+function info(pids) {
+  settle(0.2);
+  apps(pids).forEach(function (x) {
+    out(x.pid + ' hidden=' + (x.app.hidden ? 1 : 0) + ' active=' + (x.app.active ? 1 : 0));
+  });
+  out('front=' + frontPid());
+}
+
+function badge(src, dest) {
+  var img = $.NSImage.alloc.initWithContentsOfFile(src);
+  var S = 1024;
+  var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
+    null, S, S, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
+  var ctx = $.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);
+  $.NSGraphicsContext.saveGraphicsState;
+  $.NSGraphicsContext.setCurrentContext(ctx);
+  ctx.setImageInterpolation($.NSImageInterpolationHigh);
+  if (img && !img.isNil()) {
+    img.drawInRectFromRectOperationFraction($.NSMakeRect(0, 0, S, S), $.NSZeroRect, $.NSCompositingOperationSourceOver, 1);
+  } else {
+    $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.15, 0.17, 0.22, 1).setFill;
+    $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(100, 100, 824, 824), 185, 185).fill;
+  }
+  // the pause sign: a dark disc with two white bars, lower right
+  $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.05, 0.05, 0.08, 0.92).setFill;
+  $.NSBezierPath.bezierPathWithOvalInRect($.NSMakeRect(540, 90, 400, 400)).fill;
+  $.NSColor.whiteColor.setFill;
+  $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(655, 190, 60, 200), 18, 18).fill;
+  $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius($.NSMakeRect(765, 190, 60, 200), 18, 18).fill;
+  ctx.flushGraphics;
+  $.NSGraphicsContext.restoreGraphicsState;
+  var png = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+  if (!png.writeToFileAtomically(dest, true)) throw 'cannot write ' + dest;
+  return 'ok';
+}
+
+function run(argv) {
+  try {
+    var cmd = argv[0], rest = argv.slice(1);
+    if (cmd === 'hide') return hide(rest);
+    if (cmd === 'show') return show(rest);
+    if (cmd === 'info') return info(rest);
+    if (cmd === 'badge') return badge(rest[0], rest[1]);
+    return 'unknown command';
+  } catch (e) {
+    return 'error: ' + e;
+  }
+}
+EOF
+  if /usr/bin/cmp -s "$f.new" "$f"; then rm -f "$f.new"; else mv "$f.new" "$f"; fi
+  echo "$f"
+}
+
+# Whether the game is paused now. A note left by a game that has gone since
+# (the Mac restarted, or the game was ended from the Dock) is cleared.
+game_paused() {
+  [ -f "$GAME_PAUSED" ] || return 1
+  if game_running; then return 0; fi
+  rm -f "$GAME_PAUSED"
+  return 1
+}
+
+pause_field() { sed -n "s/^$1=//p" "$GAME_PAUSED" 2>/dev/null | head -n 1; }
+
+# "2 h 5 min" for a number of seconds
+pause_words() {
+  local s="${1:-0}"
+  if [ "$s" -ge 3600 ]; then echo "$((s / 3600)) h $(((s % 3600) / 60)) min"
+  elif [ "$s" -ge 60 ]; then echo "$((s / 60)) min"
+  else echo "$s s"; fi
+}
+
+# Wine's programs in the order they are frozen: the game first, Wine's server
+# last, so that the game stops between two of its own frames and not while it
+# waits for an answer from a server that is already frozen.
+pause_order() {
+  local pids pats pid cmd g="" r="" s=""
+  pids=" $(wine_pids | tr '\n' ' ') "
+  pats="$(game_patterns || true)"
+  while read -r pid cmd; do
+    case "$pids" in *" $pid "*) ;; *) continue ;; esac
+    if [ -n "$pats" ] && printf '%s\n' "$cmd" | /usr/bin/grep -qiF -e "$pats"; then g="$g $pid"
+    elif printf '%s\n' "$cmd" | /usr/bin/grep -qE '/wineserver( |$)'; then s="$s $pid"
+    else r="$r $pid"; fi
+  done < <(/bin/ps -x -o pid=,command=)
+  echo $g $r $s
+}
+
+# How many of the processes given are not frozen.
+pids_running() {
+  local p n=0 st
+  for p in "$@"; do
+    st="$(/bin/ps -o stat= -p "$p" 2>/dev/null)" || continue
+    case "$st" in T*) ;; *) n=$((n + 1)) ;; esac
+  done
+  echo "$n"
+}
+
+# $1 = "app" when the Pause app asked (it shows the game itself, and wants a last line it can read),
+# "hotkey" when the hotkey did (the game is in front: its own pause menu is opened first)
+cmd_pause() {
+  local from="${1:-}" gpid order js left=0 i
+  load_conf
+  need_wine
+  mkdir -p "$LOGS"
+  if game_paused; then
+    say "The game is already paused (for $(pause_words $(( $(date +%s) - $(pause_field since) )))). To carry on: bash $HOME_DIR/skywalker.sh resume"
+    echo "state=paused game=$(pause_field game)"
+    return 0
+  fi
+  other_wine_running && die "CrossOver or another Wine is running, and its programs look like the game's. Quit it first."
+  game_running || die "The game is not running, so there is nothing to pause."
+  gpid="$(game_pid)"
+  order="$(pause_order)"
+  [ -n "$order" ] || die "Could not find the game's processes."
+  # the last checkpoint is copied now, in case the paused game is lost (a restart)
+  backup_saves > /dev/null 2>&1 || true
+  # from the hotkey, the game is in front and in play: open its own pause menu first
+  if [ "$from" = hotkey ]; then pause_menu_key; fi
+  # Hidden first, while the game can still answer: the desktop comes back, and
+  # the game hears that it went to the background (games tend to pause themselves there).
+  js="$(pause_js)"
+  # shellcheck disable=SC2086
+  bounded_quiet 10 /usr/bin/osascript -l JavaScript "$js" hide $gpid $order > "$LOGS/pause-hide.txt" 2>&1
+  sleep "${PAUSE_SETTLE:-2}"
+  {
+    echo "since=$(date +%s)"
+    echo "game=$gpid"
+    echo "screen=$(screen_key "$(screen_now 2>/dev/null || true)")"
+  } > "$GAME_PAUSED"
+  for i in 1 2 3; do
+    order="$(pause_order)"   # again: a program may have started meanwhile
+    # shellcheck disable=SC2086
+    kill -STOP $order 2>/dev/null
+    sleep 0.3
+    # shellcheck disable=SC2086
+    left="$(pids_running $order)"
+    [ "$left" = 0 ] && break
+  done
+  echo "$(date '+%Y-%m-%d %H:%M:%S') paused: game $gpid, $(echo $order | wc -w | tr -d ' ') programs, $left not frozen" >> "$LOGS/pauses.log"
+  [ "$left" = 0 ] || say "Warning: $left of Wine's programs did not freeze."
+  say "Paused: the game is frozen where it is and uses no processor time. Closing the lid is fine; a restart or shutdown would lose it."
+  say "To carry on: click Skywalker Pause or the game's icon, or run: bash $HOME_DIR/skywalker.sh resume"
+  [ -n "$from" ] || notify "Paused. Click Skywalker Pause or the game's icon to carry on."
+  echo "state=paused game=$gpid"
+}
+
+cmd_resume() {
+  local from="${1:-}" gpid since secs js front=""
+  load_conf
+  need_wine
+  mkdir -p "$LOGS"
+  if ! game_paused; then
+    say "The game is not paused."
+    echo "state=running game=$(game_pid 2>/dev/null || true)"
+    return 0
+  fi
+  since="$(pause_field since)"
+  resume_wine all
+  rm -f "$GAME_PAUSED"
+  gpid="$(game_pid)"
+  secs=$(( $(date +%s) - ${since:-$(date +%s)} ))
+  if [ "$from" != app ]; then
+    js="$(pause_js)"
+    # shellcheck disable=SC2046
+    front="$(bounded_quiet 10 /usr/bin/osascript -l JavaScript "$js" show $gpid $(pause_order) 2>&1 | tail -n 1)"
+  fi
+  echo "$(date '+%Y-%m-%d %H:%M:%S') resumed after $(pause_words "$secs"): game $gpid ${front}" >> "$LOGS/pauses.log"
+  say "Resumed after $(pause_words "$secs")."
+  # a screen change while paused is picked up by the launcher's screen watcher, which fits the game again now
+  echo "state=resumed game=$gpid"
+}
+
+# What the Pause app runs: pause a running game, resume a paused one.
+cmd_toggle_pause() {
+  load_conf
+  if game_paused; then cmd_resume "${1:-}"
+  elif game_running; then cmd_pause "${1:-}"
+  else
+    notify "The game is not running."
+    say "The game is not running."
+    echo "state=none"
+  fi
+}
+
+# The Pause app: one click pauses the game (it is hidden and frozen), the next
+# brings it back. Made next to the game's app, with the game's icon and a pause sign.
+pause_app_js() {
+  cat <<EOF
+// Skywalker Pause: pauses the game, or brings back a paused one (skywalker.sh toggle-pause).
+ObjC.import('AppKit');
+var LAUNCHER = '$(app_launcher_path)';
+function run() {
+  var app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  var L = LAUNCHER.replace(/^\\\$HOME/, \$.NSHomeDirectory().js);
+  var out = '';
+  try {
+    out = app.doShellScript("/bin/bash '" + L.replace(/'/g, "'\\\\''") + "' toggle-pause app 2>&1");
+  } catch (e) {
+    app.displayNotification(String(e).slice(0, 180), { withTitle: 'Skywalker Saga' });
+    return;
+  }
+  var m = /state=resumed game=(\\d+)/.exec(out);
+  if (!m) return;
+  // this app was just clicked, so it is the one that may hand the front over to the game
+  var a = \$.NSRunningApplication.runningApplicationWithProcessIdentifier(parseInt(m[1], 10));
+  if (!a || a.isNil()) return;
+  a.unhide;
+  var me = \$.NSApplication.sharedApplication;
+  if (me.respondsToSelector('yieldActivationToApplication:')) me.yieldActivationToApplication(a);
+  a.activateWithOptions(3);
+}
+EOF
+}
+
+create_pause_app() {
+  local t b js icon=""
+  [ -x "$OSACOMPILE" ] || die "The Pause app needs macOS (osacompile)."
+  t="$(mktemp -d "${TMPDIR:-/tmp}/skywalker-pause.XXXXXX")" || return 1
+  b="$t/Skywalker Pause.app"
+  pause_app_js > "$t/pause-app.js"
+  if ! "$OSACOMPILE" -l JavaScript -o "$b" "$t/pause-app.js" > "$t/osacompile.txt" 2>&1; then
+    say "The Pause app could not be compiled: $(cat "$t/osacompile.txt")"
+    rm -rf "$t"
+    return 1
+  fi
+  js="$(pause_js)"
+  if [ -s "$APP/Contents/Resources/AppIcon.icns" ]; then icon="$APP/Contents/Resources/AppIcon.icns"; fi
+  if [ "$(bounded_quiet 60 /usr/bin/osascript -l JavaScript "$js" badge "${icon:-none}" "$t/icon1024.png" 2>&1)" = ok ]; then
+    mkdir -p "$t/AppIcon.iconset"
+    for s in 16 32 128 256 512; do
+      /usr/bin/sips -z "$s" "$s" "$t/icon1024.png" --out "$t/AppIcon.iconset/icon_${s}x${s}.png" > /dev/null 2>&1
+      /usr/bin/sips -z "$((s * 2))" "$((s * 2))" "$t/icon1024.png" --out "$t/AppIcon.iconset/icon_${s}x${s}@2x.png" > /dev/null 2>&1
+    done
+    if /usr/bin/iconutil -c icns "$t/AppIcon.iconset" -o "$b/Contents/Resources/applet.icns" 2>/dev/null; then
+      rm -f "$b/Contents/Resources/Assets.car"
+      /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$b/Contents/Info.plist" > /dev/null 2>&1 || true
+    fi
+  fi
+  plist_set "$b/Contents/Info.plist" CFBundleIdentifier "$PAUSE_ID"
+  plist_set "$b/Contents/Info.plist" CFBundleName "Skywalker Pause"
+  plist_set "$b/Contents/Info.plist" CFBundleDisplayName "Skywalker Pause"
+  /usr/bin/codesign --force --deep --sign - "$b" > /dev/null 2>&1 || true
+  mkdir -p "$(dirname "$PAUSE_APP")"
+  rm -rf "$PAUSE_APP.old"
+  if [ -d "$PAUSE_APP" ]; then mv "$PAUSE_APP" "$PAUSE_APP.old"; fi
+  mv "$b" "$PAUSE_APP"
+  rm -rf "$PAUSE_APP.old" "$t"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$PAUSE_APP" > /dev/null 2>&1 || true
+  say "Pause app: $PAUSE_APP (Spotlight finds it as \"Skywalker Pause\": Cmd-Space, type pause, Return)"
+}
+
+# Puts the Pause app in the Dock just after the game's icon (or at the end).
+dock_pin_pause() {
+  local js url game_url plist i u n="" have=0
+  [ -d "$PAUSE_APP" ] || die "The Pause app is missing. Run: bash $HOME_DIR/skywalker.sh pause-app"
+  js="$(appicon_js)"
+  url="$(/usr/bin/osascript -l JavaScript "$js" url "$PAUSE_APP" 2>/dev/null)"
+  game_url="$(/usr/bin/osascript -l JavaScript "$js" url "$APP" 2>/dev/null)"
+  case "$url" in file://*) ;; *) die "Could not work out the Pause app's address for the Dock ($url)." ;; esac
+  plist="$HOME_DIR/.dock-pause.plist"
+  mkdir -p "$HOME_DIR/settings-backups"
+  /usr/bin/defaults export com.apple.dock "$plist" 2>/dev/null || die "Could not read the Dock's settings."
+  cp "$plist" "$HOME_DIR/settings-backups/dock-$(date +%Y%m%d-%H%M%S).plist"
+  i=0
+  while /usr/libexec/PlistBuddy -c "Print :persistent-apps:$i" "$plist" > /dev/null 2>&1; do
+    u="$(/usr/libexec/PlistBuddy -c "Print :persistent-apps:$i:tile-data:file-data:_CFURLString" "$plist" 2>/dev/null)" || u=""
+    [ "$u" = "$url" ] && have=1
+    [ "$u" = "$game_url" ] && n=$((i + 1))
+    i=$((i + 1))
+    [ "$i" -lt 500 ] || break
+  done
+  if [ "$have" = 1 ]; then rm -f "$plist"; say "The Dock already has the Pause app."; return 0; fi
+  n="${n:-$i}"
+  /usr/libexec/PlistBuddy \
+    -c "Add :persistent-apps:$n dict" \
+    -c "Add :persistent-apps:$n:tile-type string file-tile" \
+    -c "Add :persistent-apps:$n:tile-data dict" \
+    -c "Add :persistent-apps:$n:tile-data:file-label string Skywalker Pause" \
+    -c "Add :persistent-apps:$n:tile-data:file-data dict" \
+    -c "Add :persistent-apps:$n:tile-data:file-data:_CFURLString string $url" \
+    -c "Add :persistent-apps:$n:tile-data:file-data:_CFURLStringType integer 15" \
+    "$plist" || die "Could not add the Pause app to the Dock's settings."
+  for i in 1 2 3; do
+    /usr/bin/defaults import com.apple.dock "$plist" || die "Could not save the Dock's settings."
+    /usr/bin/killall Dock 2>/dev/null || true
+    sleep 3
+    /usr/bin/defaults export com.apple.dock "$plist.check" 2>/dev/null || true
+    if dock_count "$plist.check" "$url" | grep -qx 1; then have=1; break; fi
+  done
+  rm -f "$plist" "$plist.check"
+  [ "$have" = 1 ] || die "The Dock did not take the change. Try again: bash $HOME_DIR/skywalker.sh pause-app"
+  say "The Pause app is in the Dock, next to the game."
+}
+
+# ---- the pause hotkey
+# While the game runs, a small listener (tools/skyhotkey) holds a system-wide
+# keyboard shortcut, Ctrl-Option-P unless set otherwise with "hotkey". A press
+# pauses the game (after opening its own pause menu), the next press brings it
+# back. It uses the system's hotkey service, which needs no permission in
+# System Settings, and the key never reaches the game.
+HOTKEY_FILE="$HOME_DIR/pause-hotkey"   # ctrl-option-p (default), another combination, or off
+HOTKEY_PID="$HOME_DIR/.hotkey.pid"
+HOTKEY_PAD="$HOME_DIR/pause-pad"   # "on": the controller's two small middle buttons together pause too
+SKYKEY="$HOME_DIR/tools/skykey.exe"   # presses a key for the game, inside Wine (scripts/skykey.c)
+SKYHOTKEY="$HOME_DIR/tools/skyhotkey"   # holds the hotkey (scripts/skyhotkey.swift)
+
+hotkey_spec() {
+  local s
+  s="$(cat "$HOTKEY_FILE" 2>/dev/null | tr -d ' \n')"
+  echo "${s:-ctrl-option-p}"
+}
+
+# "ctrl-option-p" -> "Ctrl-Option-P"
+hotkey_words() { echo "$1" | awk -F- '{ for (i = 1; i <= NF; i++) { w = toupper(substr($i, 1, 1)) substr($i, 2); printf "%s%s", (i > 1 ? "-" : ""), w } print "" }'; }
+
+
+# The system's numbers for the keys of a combination like ctrl-option-p: "KEYCODE MODS".
+hotkey_codes() {
+  local spec part key mods=0 code=""
+  spec="$(echo "$1" | tr 'A-Z' 'a-z')"
+  key="${spec##*-}"
+  for part in $(echo "${spec%-*}" | tr '-' ' '); do
+    case "$part" in
+      cmd|command) mods=$((mods | 256)) ;;
+      shift) mods=$((mods | 512)) ;;
+      option|opt|alt) mods=$((mods | 2048)) ;;
+      ctrl|control) mods=$((mods | 4096)) ;;
+      *) return 1 ;;
+    esac
+  done
+  case "$key" in
+    a) code=0 ;; s) code=1 ;; d) code=2 ;; f) code=3 ;; h) code=4 ;; g) code=5 ;; z) code=6 ;; x) code=7 ;;
+    c) code=8 ;; v) code=9 ;; b) code=11 ;; q) code=12 ;; w) code=13 ;; e) code=14 ;; r) code=15 ;; y) code=16 ;;
+    t) code=17 ;; 1) code=18 ;; 2) code=19 ;; 3) code=20 ;; 4) code=21 ;; 6) code=22 ;; 5) code=23 ;; 9) code=25 ;;
+    7) code=26 ;; 8) code=28 ;; 0) code=29 ;; o) code=31 ;; u) code=32 ;; i) code=34 ;; p) code=35 ;; l) code=37 ;;
+    j) code=38 ;; k) code=40 ;; n) code=45 ;; m) code=46 ;;
+    f1) code=122 ;; f2) code=120 ;; f3) code=99 ;; f4) code=118 ;; f5) code=96 ;; f6) code=97 ;; f7) code=98 ;;
+    f8) code=100 ;; f9) code=101 ;; f10) code=109 ;; f11) code=103 ;; f12) code=111 ;;
+    *) return 1 ;;
+  esac
+  [ "$mods" -gt 0 ] || return 1
+  echo "$code $mods"
+}
+
+# Starts the listener for as long as the game runs (play() stops it).
+hotkey_start() {
+  local spec codes me
+  spec="$(hotkey_spec)"
+  [ "$spec" = off ] && return 0
+  if ! codes="$(hotkey_codes "$spec")"; then
+    say "The pause hotkey \"$spec\" is not a key combination I know; set another with: bash $HOME_DIR/skywalker.sh hotkey ctrl-option-p"
+    return 0
+  fi
+  if [ ! -x "$SKYHOTKEY" ]; then
+    say "The hotkey helper ($SKYHOTKEY) is missing, so there is no pause hotkey this time. The Pause app still works."
+    return 0
+  fi
+  hotkey_stop
+  me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  mkdir -p "$LOGS"
+  echo "== $(date '+%Y-%m-%d %H:%M:%S') listening for $spec" >> "$LOGS/hotkey.log"
+  local pad=""
+  if [ "$(cat "$HOTKEY_PAD" 2>/dev/null)" = on ]; then pad=pad; fi
+  # shellcheck disable=SC2086
+  "$SKYHOTKEY" $codes "$me" 43200 $pad >> "$LOGS/hotkey.log" 2>&1 &
+  echo $! > "$HOTKEY_PID"
+  say "Pause hotkey: $(hotkey_words "$spec") pauses the game and brings it back."
+}
+
+hotkey_stop() {
+  local pid
+  pid="$(cat "$HOTKEY_PID" 2>/dev/null || true)"
+  case "$pid" in ''|*[!0-9]*) ;; *)
+    if /bin/ps -p "$pid" -o command= 2>/dev/null | /usr/bin/grep -q 'skyhotkey'; then kill "$pid" 2>/dev/null || true; fi ;;
+  esac
+  rm -f "$HOTKEY_PID"
+}
+
+# Opens the game's own pause menu (a press of Esc, PAUSE_MENU_KEY) so that it
+# is paused in the game too, and stays paused when it is brought back.
+pause_menu_key() {
+  local key="${PAUSE_MENU_KEY:-esc}"
+  [ "$key" = off ] && return 0
+  if [ ! -f "$SKYKEY" ]; then
+    echo "skykey.exe is missing: the game's menu was not opened first" >> "$LOGS/pause-hide.txt"
+    return 0
+  fi
+  wine_env
+  WINEDEBUG=-all bounded_quiet 15 "$CUR/bin/wine" "$SKYKEY" "$key" >> "$LOGS/pause-hide.txt" 2>&1
+  sleep "${PAUSE_MENU_WAIT:-1}"
+}
+
+cmd_hotkey() {
+  local a="${1:-show}"
+  load_conf
+  case "$a" in
+    show)
+      echo "Pause hotkey: $(hotkey_words "$(hotkey_spec)") (works while the game runs; set another with: hotkey ctrl-option-p, or hotkey off)"
+      if [ -f "$SKYKEY" ]; then echo "Before pausing, it opens the game's menu with: ${PAUSE_MENU_KEY:-esc}"; else echo "The key helper is missing ($SKYKEY), so the game's menu is not opened first."; fi
+      [ -x "$SKYHOTKEY" ] || echo "The hotkey helper is missing ($SKYHOTKEY), so there is no hotkey yet."
+      if [ "$(cat "$HOTKEY_PAD" 2>/dev/null)" = on ]; then echo "Controller: its two small middle buttons together pause too (hotkey pad off to stop)."; else echo "Controller: not used (hotkey pad on: its two small middle buttons together pause too)."; fi ;;
+    pad)
+      case "${2:-}" in
+        on) echo on > "$HOTKEY_PAD"; say "The controller pauses too: press its two small middle buttons together (Options and Create). From the next start of the game." ;;
+        off) rm -f "$HOTKEY_PAD"; say "The controller no longer pauses the game." ;;
+        *) die "Use: hotkey pad on, or hotkey pad off" ;;
+      esac ;;
+    off) echo off > "$HOTKEY_FILE"; hotkey_stop; say "No pause hotkey. The Pause app and the game's icon still work." ;;
+    listen)   # for tests: the listener in front, for $2 seconds
+      [ -x "$SKYHOTKEY" ] || die "The hotkey helper is missing: $SKYHOTKEY"
+      # shellcheck disable=SC2046
+      exec "$SKYHOTKEY" $(hotkey_codes "$(hotkey_spec)") "$HOME_DIR/skywalker.sh" "${2:-43200}" $([ "$(cat "$HOTKEY_PAD" 2>/dev/null)" = on ] && echo pad) ;;
+    *)
+      hotkey_codes "$a" > /dev/null || die "Not a key combination I know: $a (for example ctrl-option-p, cmd-shift-f9)"
+      echo "$a" | tr 'A-Z' 'a-z' > "$HOTKEY_FILE"
+      say "Pause hotkey: $(hotkey_words "$(hotkey_spec)"). It is used from the next start of the game." ;;
+  esac
+}
+
 cmd_uninstall() {
   local answer
   load_conf
@@ -3097,6 +3614,11 @@ case "${1:-run}" in
   pause-steam) load_conf; wine_env; if pause_wine; then say "Steam is paused."; else say "Nothing to pause."; fi ;;
   steam) shift; cmd_steam "$@" ;;
   stop) cmd_stop ;;
+  pause) cmd_pause ;;
+  resume) cmd_resume ;;
+  toggle-pause) shift; cmd_toggle_pause "${1:-}" ;;   # what the Pause app runs
+  hotkey) shift; cmd_hotkey "$@" ;;
+  pause-app) load_conf; create_pause_app && { [ -n "${SKYWALKER_NO_DOCK:-}" ] || dock_pin_pause; } ;;
   prewarm) shift; cmd_prewarm "${1:-}" ;;
   autostart) shift; cmd_autostart "${1:-status}" ;;
   cpu) shift; cmd_cpu "${1:-30}" ;;
