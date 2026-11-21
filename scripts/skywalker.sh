@@ -41,10 +41,11 @@
 #                                not a restart or shutdown
 #   skywalker.sh resume          carry on with a paused game (clicking the game's icon does this too)
 #   skywalker.sh toggle-pause    pause or resume, whichever fits (what the Pause app runs)
-#   skywalker.sh hotkey [keys|off]
+#   skywalker.sh hotkey [keys|off|pad on|pad off]
 #                                the key combination that pauses and resumes while the game runs:
 #                                ctrl-option-p unless set otherwise; it opens the game's own pause
-#                                menu (Esc) before freezing it. No permission needed.
+#                                menu (Esc) before freezing it. No permission needed. pad on: the
+#                                controller's Options and Create buttons pressed together do the same
 #   skywalker.sh pause-app       make the Pause app (game icon with a pause sign) and put it in the
 #                                Dock next to the game; Spotlight finds it too: Cmd-Space, "pause"
 #   skywalker.sh stop            shut down Steam and Wine
@@ -3454,6 +3455,7 @@ dock_pin_pause() {
 # System Settings, and the key never reaches the game.
 HOTKEY_FILE="$HOME_DIR/pause-hotkey"   # ctrl-option-p (default), another combination, or off
 HOTKEY_PID="$HOME_DIR/.hotkey.pid"
+HOTKEY_PAD="$HOME_DIR/pause-pad"   # "on": the controller's two small middle buttons together pause too
 SKYKEY="$HOME_DIR/tools/skykey.exe"   # presses a key for the game, inside Wine (scripts/skykey.c)
 SKYHOTKEY="$HOME_DIR/tools/skyhotkey"   # holds the hotkey (scripts/skyhotkey.swift)
 
@@ -3512,8 +3514,10 @@ hotkey_start() {
   me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
   mkdir -p "$LOGS"
   echo "== $(date '+%Y-%m-%d %H:%M:%S') listening for $spec" >> "$LOGS/hotkey.log"
+  local pad=""
+  if [ "$(cat "$HOTKEY_PAD" 2>/dev/null)" = on ]; then pad=pad; fi
   # shellcheck disable=SC2086
-  "$SKYHOTKEY" $codes "$me" 43200 >> "$LOGS/hotkey.log" 2>&1 &
+  "$SKYHOTKEY" $codes "$me" 43200 $pad >> "$LOGS/hotkey.log" 2>&1 &
   echo $! > "$HOTKEY_PID"
   say "Pause hotkey: $(hotkey_words "$spec") pauses the game and brings it back."
 }
@@ -3548,12 +3552,19 @@ cmd_hotkey() {
     show)
       echo "Pause hotkey: $(hotkey_words "$(hotkey_spec)") (works while the game runs; set another with: hotkey ctrl-option-p, or hotkey off)"
       if [ -f "$SKYKEY" ]; then echo "Before pausing, it opens the game's menu with: ${PAUSE_MENU_KEY:-esc}"; else echo "The key helper is missing ($SKYKEY), so the game's menu is not opened first."; fi
-      [ -x "$SKYHOTKEY" ] || echo "The hotkey helper is missing ($SKYHOTKEY), so there is no hotkey yet." ;;
+      [ -x "$SKYHOTKEY" ] || echo "The hotkey helper is missing ($SKYHOTKEY), so there is no hotkey yet."
+      if [ "$(cat "$HOTKEY_PAD" 2>/dev/null)" = on ]; then echo "Controller: its two small middle buttons together pause too (hotkey pad off to stop)."; else echo "Controller: not used (hotkey pad on: its two small middle buttons together pause too)."; fi ;;
+    pad)
+      case "${2:-}" in
+        on) echo on > "$HOTKEY_PAD"; say "The controller pauses too: press its two small middle buttons together (Options and Create). From the next start of the game." ;;
+        off) rm -f "$HOTKEY_PAD"; say "The controller no longer pauses the game." ;;
+        *) die "Use: hotkey pad on, or hotkey pad off" ;;
+      esac ;;
     off) echo off > "$HOTKEY_FILE"; hotkey_stop; say "No pause hotkey. The Pause app and the game's icon still work." ;;
     listen)   # for tests: the listener in front, for $2 seconds
       [ -x "$SKYHOTKEY" ] || die "The hotkey helper is missing: $SKYHOTKEY"
       # shellcheck disable=SC2046
-      exec "$SKYHOTKEY" $(hotkey_codes "$(hotkey_spec)") "$HOME_DIR/skywalker.sh" "${2:-43200}" ;;
+      exec "$SKYHOTKEY" $(hotkey_codes "$(hotkey_spec)") "$HOME_DIR/skywalker.sh" "${2:-43200}" $([ "$(cat "$HOTKEY_PAD" 2>/dev/null)" = on ] && echo pad) ;;
     *)
       hotkey_codes "$a" > /dev/null || die "Not a key combination I know: $a (for example ctrl-option-p, cmd-shift-f9)"
       echo "$a" | tr 'A-Z' 'a-z' > "$HOTKEY_FILE"

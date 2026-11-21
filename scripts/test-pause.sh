@@ -190,11 +190,13 @@ tail -n +"$((lines_before + 1))" "$EV" | grep -q 'keydown 0x1b' && ok "the game 
 [ "$(not_frozen)" = 0 ] && ok "and it is paused" || bad "toggle-pause hotkey did not pause"
 with_deadline 60 /bin/bash "$SKY" toggle-pause hotkey > "$OUT/hotkey-toggle2.txt" 2>&1
 grep -q state=resumed "$OUT/hotkey-toggle2.txt" && ok "the second press resumes" || bad "the second press did not resume"
+/bin/bash "$SKY" hotkey pad on | sed 's/^/  /'
 /bin/bash "$SKY" hotkey listen 240 > "$OUT/hotkey-listen.txt" 2>&1 &
 HK=$!
 if wait_for 20 grep -q '^registered' "$OUT/hotkey-listen.txt"; then
   sed 's/^/  listener: /' "$OUT/hotkey-listen.txt"
   grep -q 'registered status=0' "$OUT/hotkey-listen.txt" && ok "the system took the hotkey (no permission asked)" || bad "the hotkey was refused"
+  wait_for 10 grep -q '^watching controllers' "$OUT/hotkey-listen.txt" && ok "it also watches for controllers (no controller here to press)" || bad "the controller watch did not start"
 else
   bad "the listener did not start: $(cat "$OUT/hotkey-listen.txt")"
 fi
