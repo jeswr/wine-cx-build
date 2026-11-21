@@ -9,7 +9,8 @@
 #           FIRST_TRACE=<WINEDEBUG value for the first start, which downloads Steam's update>,
 #           ROUNDS=<one set of Steam options per line>: instead of watching one start, time
 #           each of these starts up to Steam's sign-in screen and write timeline.txt,
-#           STEAMTEST_OUT=<folder for logs and screenshots> (default ./steam-logs)
+#           STEAMTEST_OUT=<folder for logs and screenshots> (default ./steam-logs),
+#           READY_TEST=1: check "ready on" (Steam paused once ready, woken on use) instead
 # Written for the stock /bin/bash 3.2 on macOS.
 set -uo pipefail
 
@@ -183,6 +184,97 @@ time_round() {
     if [ "$(wc -c < "$f")" -gt 3000000 ]; then gzip -c "$f" > "$dir/$(basename "$f").gz"; rm -f "$f"; else mv "$f" "$dir/"; fi
   done
 }
+
+# ---- READY_TEST=1: "ready on" with real Steam. The log-in item starts Steam,
+# Steam reaches its sign-in screen (no account here) and the launcher pauses
+# it. Checks that paused programs use no processor time, that a woken Steam
+# still answers, and that stop and "ready off" clean up.
+wine_cmds() { /bin/ps -axww -o "$1",command= | grep -E ' [A-Za-z]:[\\]|/[w]ineserver'; }
+cpu_total() {
+  wine_cmds cputime= | awk '{ n = split($1, a, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + a[i]; t += s } END { printf "%.2f", t }'
+}
+states() { wine_cmds stat= | awk '{ print substr($1, 1, 1) }' | sort | uniq -c | awk '{ printf "%s x%s  ", $2, $1 }'; }
+steam_count() { /bin/ps -axww -o command= | grep -c -i -E '[\\]steam\.exe( |$)' || true; }
+
+ready_test() {
+  local rc=0 t c1 c2 since t0 ack mem helpers0 helpers1
+  fail_r() { note "FAIL: $*"; rc=1; }
+  # the log-in item gets no SKY_ settings, so the bottle goes in the config file
+  echo "PREFIX=\"$SKY_PREFIX\"" >> "$SKYWALKER_HOME/config.env"
+  export SKY_PAUSE_AFTER_READY=20
+  echo "PAUSE_AFTER_READY=20" >> "$SKYWALKER_HOME/config.env"
+  rm -f "$STEAM_DIR"/logs/*.txt
+  note "ready on"
+  /bin/bash "$L" ready on
+  t=0
+  while [ "$t" -lt 300 ]; do
+    sleep 5; t=$((t + 5))
+    [ -f "$SKYWALKER_HOME/steam-paused" ] && break
+  done
+  note "after ${t}s: Wine programs by state: $(states)"
+  cat "$SKYWALKER_HOME/logs/autostart.log" 2>/dev/null | tail -n 5
+  grep -a 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null | head -n 1
+  [ -f "$SKYWALKER_HOME/steam-paused" ] || { fail_r "Steam was not paused within 300 s of ready on"; /bin/bash "$L" stop; return 1; }
+  /bin/bash "$L" ready status
+  /bin/bash "$L" windows > "$OUT/ready-windows-before.txt" 2>&1
+  helpers0="$(helpers)"
+  if wine_cmds stat= | awk '{ print substr($1, 1, 1) }' | grep -q -v T; then fail_r "some Wine programs are not paused: $(states)"; fi
+  mem="$(wine_cmds rss= | awk '{ t += $1 } END { printf "%d", t / 1024 }')"
+  c1="$(cpu_total)"
+  sleep 60
+  c2="$(cpu_total)"
+  note "paused: $(wine_cmds pid= | wc -l | tr -d ' ') Wine programs, ${mem} MB of memory, $(echo "$c1 $c2" | awk '{ printf "%.2f", $2 - $1 }') s of processor time in 60 s"
+  echo "$c1 $c2" | awk '{ exit !($2 - $1 < 0.05) }' || fail_r "paused programs still used processor time"
+  note "staying paused for 2 more minutes"
+  sleep 120
+
+  # wake it the way the launcher does before any Wine command, and hand the open
+  # Steam a command line: a working Steam takes it and the second steam.exe exits
+  since="$(date '+%Y-%m-%d %H:%M:%S')"; t0="$(date +%s)"
+  WINEDEBUG=-all with_deadline 90 /bin/bash "$L" wine 'C:\Program Files (x86)\Steam\steam.exe' -silent steam://open/settings > "$OUT/ready-wake.log" 2>&1 &
+  ack=""
+  t=0
+  while [ "$t" -lt 90 ]; do
+    sleep 1; t=$((t + 1))
+    if [ -z "$ack" ] && awk -v s="[$since]" 'substr($0, 1, 21) >= s && /ExecCommandLine/ { f = 1 } END { exit !f }' "$STEAM_DIR/logs/console_log.txt" 2>/dev/null; then
+      ack="$(( $(date +%s) - t0 ))"
+    fi
+    if [ -n "$ack" ] && [ "$(steam_count)" -le 1 ]; then break; fi
+  done
+  wait 2>/dev/null
+  note "woken: Steam logged the command after ${ack:-never} s; steam.exe processes now: $(steam_count); states: $(states)"
+  grep -a 'ExecCommandLine' "$STEAM_DIR/logs/console_log.txt" 2>/dev/null | tail -n 2
+  [ -n "$ack" ] || fail_r "the woken Steam did not take the command line"
+  [ "$(steam_count)" -le 1 ] || fail_r "the second steam.exe did not hand over and exit"
+  [ ! -f "$SKYWALKER_HOME/steam-paused" ] || fail_r "the pause note is still there after waking"
+  sleep 10
+  helpers1="$(helpers)"
+  /bin/bash "$L" windows > "$OUT/ready-windows-after.txt" 2>&1
+  note "browser helpers before/after: $helpers0/$helpers1; windows after:"
+  cat "$OUT/ready-windows-after.txt"
+  [ "$helpers1" -gt 0 ] || fail_r "Steam's browser part is gone after waking"
+  screencapture -x "$OUT/ready-after-wake.png" 2>/dev/null || true
+
+  # paused again, then stopped while paused: nothing may be left
+  /bin/bash "$L" pause-steam
+  sleep 2
+  note "paused again: $(states)"
+  with_deadline 120 /bin/bash "$L" stop || fail_r "stop of a paused Steam did not finish"
+  sleep 5
+  [ "$(wine_cmds pid= | wc -l | tr -d ' ')" = 0 ] || { fail_r "Wine programs left after stop: $(states)"; wine_cmds stat= | cut -c1-200; }
+  /bin/bash "$L" ready off
+  [ ! -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail_r "ready off left the log-in item"
+  mkdir -p "$OUT/ready-steam"
+  cp "$STEAM_DIR"/logs/*.txt "$OUT/ready-steam/" 2>/dev/null || true
+  cp "$SKYWALKER_HOME"/logs/autostart.log "$SKYWALKER_HOME"/logs/prewarm.log "$OUT/ready-steam/" 2>/dev/null || true
+  if [ "$rc" = 0 ]; then note "READY TEST PASSED"; else note "READY TEST FAILED"; fi
+  return "$rc"
+}
+
+if [ -n "${READY_TEST:-}" ]; then
+  ready_test
+  exit $?
+fi
 
 if [ -n "${ROUNDS:-}" ]; then
   n=0
