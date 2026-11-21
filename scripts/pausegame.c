@@ -62,6 +62,9 @@ static LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DISPLAYCHANGE:
         event_line("displaychange %dx%d", (int)LOWORD(lp), (int)HIWORD(lp));
         break;
+    case WM_KEYDOWN:
+        event_line("keydown 0x%02x", (unsigned)wp);
+        break;
     case WM_SIZE:
         event_line("size %dx%d type=%d", (int)LOWORD(lp), (int)HIWORD(lp), (int)wp);
         break;

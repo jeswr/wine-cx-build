@@ -11,6 +11,8 @@ on:
       - 'scripts/skywalker.sh'
       - 'scripts/pausegame.c'
       - 'scripts/test-pause.sh'
+      - 'scripts/skykey.c'
+      - 'scripts/postkey.swift'
   workflow_dispatch:
 
 permissions:
@@ -26,7 +28,7 @@ jobs:
       matrix:
         include:
           - runner: macos-15
-            hold: 900
+            hold: 300
           - runner: macos-latest
             hold: 120
     env:
@@ -39,7 +41,8 @@ jobs:
           sw_vers; uname -m
           brew install mingw-w64 > /dev/null
           x86_64-w64-mingw32-gcc -O1 -Wall -mwindows -o pausegame.exe scripts/pausegame.c -ld3d11 -ldxgi -lwinmm -luuid -lgdi32
-          ls -la pausegame.exe
+          x86_64-w64-mingw32-gcc -O1 -Wall -o skykey.exe scripts/skykey.c
+          ls -la pausegame.exe skykey.exe
 
       - name: Install the build with the launcher, as on the Mac, and make a bottle
         run: |
@@ -55,7 +58,7 @@ jobs:
 
       - name: Pause, hold, resume
         timeout-minutes: 30
-        run: /bin/bash scripts/test-pause.sh "$PWD/pausegame.exe" "${{ matrix.hold }}"
+        run: /bin/bash scripts/test-pause.sh "$PWD/pausegame.exe" "${{ matrix.hold }}" "$PWD/skykey.exe"
 
       - name: Upload the logs
         if: always()
@@ -64,5 +67,6 @@ jobs:
           name: pause-${{ matrix.runner }}
           path: |
             selftest-logs
+            skykey.exe
             ~/Games/skywalker/logs
           if-no-files-found: ignore

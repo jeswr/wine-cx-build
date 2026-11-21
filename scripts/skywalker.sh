@@ -41,6 +41,10 @@
 #                                not a restart or shutdown
 #   skywalker.sh resume          carry on with a paused game (clicking the game's icon does this too)
 #   skywalker.sh toggle-pause    pause or resume, whichever fits (what the Pause app runs)
+#   skywalker.sh hotkey [keys|off]
+#                                the key combination that pauses and resumes while the game runs:
+#                                ctrl-option-p unless set otherwise; it opens the game's own pause
+#                                menu (Esc) before freezing it. No permission needed.
 #   skywalker.sh pause-app       make the Pause app (game icon with a pause sign) and put it in the
 #                                Dock next to the game; Spotlight finds it too: Cmd-Space, "pause"
 #   skywalker.sh stop            shut down Steam and Wine
@@ -2504,7 +2508,9 @@ play() {
     say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
     if steam_updated_since "$(cat "$LOGS/last-start")"; then say "Steam updated itself during this start, which is why it took longer than usual."; fi
   fi
+  hotkey_start
   watch_game "$log"
+  hotkey_stop
   ui_status "done" "The game has closed."
   say "The game has exited."
   keep="$(keep_seconds)"
@@ -2774,6 +2780,7 @@ cmd_stop() {
   need_wine
   wine_env
   screen_watch_stop
+  hotkey_stop
   shutdown_wine
   say "Stopped."
 }
@@ -3235,7 +3242,8 @@ pids_running() {
   echo "$n"
 }
 
-# $1 = "app" when the Pause app asked (it shows the game itself, and wants a last line it can read)
+# $1 = "app" when the Pause app asked (it shows the game itself, and wants a last line it can read),
+# "hotkey" when the hotkey did (the game is in front: its own pause menu is opened first)
 cmd_pause() {
   local from="${1:-}" gpid order js left=0 i
   load_conf
@@ -3253,6 +3261,8 @@ cmd_pause() {
   [ -n "$order" ] || die "Could not find the game's processes."
   # the last checkpoint is copied now, in case the paused game is lost (a restart)
   backup_saves > /dev/null 2>&1 || true
+  # from the hotkey, the game is in front and in play: open its own pause menu first
+  if [ "$from" = hotkey ]; then pause_menu_key; fi
   # Hidden first, while the game can still answer: the desktop comes back, and
   # the game hears that it went to the background (games tend to pause themselves there).
   js="$(pause_js)"
@@ -3277,7 +3287,7 @@ cmd_pause() {
   [ "$left" = 0 ] || say "Warning: $left of Wine's programs did not freeze."
   say "Paused: the game is frozen where it is and uses no processor time. Closing the lid is fine; a restart or shutdown would lose it."
   say "To carry on: click Skywalker Pause or the game's icon, or run: bash $HOME_DIR/skywalker.sh resume"
-  [ "$from" = app ] || notify "Paused. Click Skywalker Pause or the game's icon to carry on."
+  [ -n "$from" ] || notify "Paused. Click Skywalker Pause or the game's icon to carry on."
   echo "state=paused game=$gpid"
 }
 
@@ -3430,6 +3440,162 @@ dock_pin_pause() {
   say "The Pause app is in the Dock, next to the game."
 }
 
+# ---- the pause hotkey
+# While the game runs, a small listener (hotkey.js) holds a system-wide
+# keyboard shortcut, Ctrl-Option-P unless set otherwise with "hotkey". A press
+# pauses the game (after opening its own pause menu), the next press brings it
+# back. It uses the system's hotkey service, which needs no permission in
+# System Settings, and the key never reaches the game.
+HOTKEY_FILE="$HOME_DIR/pause-hotkey"   # ctrl-option-p (default), another combination, or off
+HOTKEY_PID="$HOME_DIR/.hotkey.pid"
+SKYKEY="$HOME_DIR/tools/skykey.exe"   # presses a key for the game, inside Wine (scripts/skykey.c)
+
+hotkey_spec() {
+  local s
+  s="$(tr -d ' \n' < "$HOTKEY_FILE" 2>/dev/null)"
+  echo "${s:-ctrl-option-p}"
+}
+
+# "ctrl-option-p" -> "Ctrl-Option-P"
+hotkey_words() { echo "$1" | awk -F- '{ for (i = 1; i <= NF; i++) { w = toupper(substr($i, 1, 1)) substr($i, 2); printf "%s%s", (i > 1 ? "-" : ""), w } print "" }'; }
+
+hotkey_valid() {
+  echo "$1" | /usr/bin/grep -Eqi '^((ctrl|control|option|opt|alt|cmd|command|shift)-)+([a-z0-9]|f[1-9]|f1[0-2])$'
+}
+
+hotkey_js() {
+  local f="$HOME_DIR/lib/hotkey.js"
+  mkdir -p "$HOME_DIR/lib"
+  cat > "$f.new" <<'EOF'
+// The launcher's pause hotkey. Run with: osascript -l JavaScript hotkey.js KEYS LAUNCHER MAXSECS
+// KEYS like ctrl-option-p. Holds that key combination system-wide through the
+// system's hotkey service (no permission needed) and, on each press, runs
+// "LAUNCHER toggle-pause hotkey". Prints "registered ..." once and "pressed N" per press.
+// Ends when its parent process has gone, or after MAXSECS.
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+ObjC.bindFunction('getppid', ['int', []]);
+ObjC.bindFunction('malloc', ['void *', ['unsigned long']]);
+ObjC.bindFunction('GetApplicationEventTarget', ['void *', []]);
+// the hot key's id is a struct of two 32-bit numbers, passed by value: one 64-bit register on arm64 and x86-64
+ObjC.bindFunction('RegisterEventHotKey', ['int', ['unsigned int', 'unsigned int', 'unsigned long', 'void *', 'unsigned int', 'void *']]);
+
+function out(s) {
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData($(s + '\n').dataUsingEncoding($.NSUTF8StringEncoding));
+}
+
+var KEYCODES = { a: 0, s: 1, d: 2, f: 3, h: 4, g: 5, z: 6, x: 7, c: 8, v: 9, b: 11, q: 12, w: 13, e: 14, r: 15,
+  y: 16, t: 17, '1': 18, '2': 19, '3': 20, '4': 21, '6': 22, '5': 23, '9': 25, '7': 26, '8': 28, '0': 29,
+  o: 31, u: 32, i: 34, p: 35, l: 37, j: 38, k: 40, n: 45, m: 46,
+  f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100, f9: 101, f10: 109, f11: 103, f12: 111 };
+var MODS = { cmd: 256, command: 256, shift: 512, option: 2048, opt: 2048, alt: 2048, ctrl: 4096, control: 4096 };
+
+function parse(spec) {
+  var parts = spec.toLowerCase().split('-'), mods = 0, key = parts.pop();
+  parts.forEach(function (p) { if (!(p in MODS)) throw 'unknown modifier ' + p; mods |= MODS[p]; });
+  if (!(key in KEYCODES)) throw 'unknown key ' + key;
+  return { code: KEYCODES[key], mods: mods };
+}
+
+function run(argv) {
+  var spec = argv[0], launcher = argv[1], maxsecs = parseInt(argv[2] || '43200', 10);
+  var k;
+  try { k = parse(spec); } catch (e) { out('error: ' + e); return; }
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy(1);   // accessory: no Dock icon, no menu bar
+  app.finishLaunching;
+  var ref = $.malloc(8);
+  // signature 'SKYP' in the low half, id 1 in the high half
+  var id = 0x534B5950 + 4294967296 * 1;
+  var st = $.RegisterEventHotKey(k.code, k.mods, id, $.GetApplicationEventTarget(), 0, ref);
+  out('registered status=' + st + ' keys=' + spec + ' code=' + k.code + ' mods=' + k.mods);
+  if (st !== 0) return;
+  var start = Date.now(), presses = 0, quietUntil = 0;
+  while (true) {
+    // only the system's own events (type 14); a hot key press is subtype 6
+    var ev = app.nextEventMatchingMaskUntilDateInModeDequeue(1 << 14, $.NSDate.dateWithTimeIntervalSinceNow(1), $.NSDefaultRunLoopMode, true);
+    if (ev && !ev.isNil()) {
+      if (ev.type === 14 && ev.subtype === 6) {
+        if (Date.now() >= quietUntil) {
+          presses++;
+          out('pressed ' + presses + ' at ' + new Date().toISOString());
+          var t = $.NSTask.alloc.init;
+          t.launchPath = '/bin/bash';
+          t.arguments = $([launcher, 'toggle-pause', 'hotkey']);
+          t.launch;
+          t.waitUntilExit;
+          out('done ' + presses + ' status=' + t.terminationStatus);
+          quietUntil = Date.now() + 1500;   // a press held or repeated during the change counts once
+        }
+      } else {
+        app.sendEvent(ev);
+      }
+    }
+    if ($.getppid() === 1) { out('parent gone'); return; }
+    if (Date.now() - start > maxsecs * 1000) { out('time up'); return; }
+  }
+}
+EOF
+  if /usr/bin/cmp -s "$f.new" "$f"; then rm -f "$f.new"; else mv "$f.new" "$f"; fi
+  echo "$f"
+}
+
+# Starts the listener for as long as the game runs (play() stops it).
+hotkey_start() {
+  local spec js me
+  spec="$(hotkey_spec)"
+  [ "$spec" = off ] && return 0
+  [ -x /usr/bin/osascript ] || return 0
+  hotkey_valid "$spec" || { say "The pause hotkey \"$spec\" is not a key combination I know; set another with: bash $HOME_DIR/skywalker.sh hotkey ctrl-option-p"; return 0; }
+  hotkey_stop
+  js="$(hotkey_js)"
+  me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  mkdir -p "$LOGS"
+  echo "== $(date '+%Y-%m-%d %H:%M:%S') listening for $spec" >> "$LOGS/hotkey.log"
+  /usr/bin/osascript -l JavaScript "$js" "$spec" "$me" 43200 >> "$LOGS/hotkey.log" 2>&1 &
+  echo $! > "$HOTKEY_PID"
+  say "Pause hotkey: $(hotkey_words "$spec") pauses the game and brings it back."
+}
+
+hotkey_stop() {
+  local pid
+  pid="$(cat "$HOTKEY_PID" 2>/dev/null || true)"
+  case "$pid" in ''|*[!0-9]*) ;; *)
+    if /bin/ps -p "$pid" -o command= 2>/dev/null | /usr/bin/grep -q 'hotkey\.js'; then kill "$pid" 2>/dev/null || true; fi ;;
+  esac
+  rm -f "$HOTKEY_PID"
+}
+
+# Opens the game's own pause menu (a press of Esc, PAUSE_MENU_KEY) so that it
+# is paused in the game too, and stays paused when it is brought back.
+pause_menu_key() {
+  local key="${PAUSE_MENU_KEY:-esc}"
+  [ "$key" = off ] && return 0
+  if [ ! -f "$SKYKEY" ]; then
+    echo "skykey.exe is missing: the game's menu was not opened first" >> "$LOGS/pause-hide.txt"
+    return 0
+  fi
+  wine_env
+  WINEDEBUG=-all bounded_quiet 15 "$CUR/bin/wine" "$SKYKEY" "$key" >> "$LOGS/pause-hide.txt" 2>&1
+  sleep "${PAUSE_MENU_WAIT:-1}"
+}
+
+cmd_hotkey() {
+  local a="${1:-show}"
+  load_conf
+  case "$a" in
+    show)
+      echo "Pause hotkey: $(hotkey_words "$(hotkey_spec)") (works while the game runs; set another with: hotkey ctrl-option-p, or hotkey off)"
+      if [ -f "$SKYKEY" ]; then echo "Before pausing, it opens the game's menu with: ${PAUSE_MENU_KEY:-esc}"; else echo "The key helper is missing ($SKYKEY), so the game's menu is not opened first."; fi ;;
+    off) echo off > "$HOTKEY_FILE"; hotkey_stop; say "No pause hotkey. The Pause app and the game's icon still work." ;;
+    listen) mkdir -p "$LOGS"; exec /usr/bin/osascript -l JavaScript "$(hotkey_js)" "$(hotkey_spec)" "$HOME_DIR/skywalker.sh" "${2:-43200}" ;;   # for tests
+    *)
+      hotkey_valid "$a" || die "Not a key combination I know: $a (for example ctrl-option-p, cmd-shift-f9)"
+      echo "$a" | tr 'A-Z' 'a-z' > "$HOTKEY_FILE"
+      say "Pause hotkey: $(hotkey_words "$(hotkey_spec)"). It is used from the next start of the game." ;;
+  esac
+}
+
 cmd_uninstall() {
   local answer
   load_conf
@@ -3462,6 +3628,7 @@ case "${1:-run}" in
   pause) cmd_pause ;;
   resume) cmd_resume ;;
   toggle-pause) shift; cmd_toggle_pause "${1:-}" ;;   # what the Pause app runs
+  hotkey) shift; cmd_hotkey "$@" ;;
   pause-app) load_conf; create_pause_app && { [ -n "${SKYWALKER_NO_DOCK:-}" ] || dock_pin_pause; } ;;
   prewarm) shift; cmd_prewarm "${1:-}" ;;
   autostart) shift; cmd_autostart "${1:-status}" ;;
