@@ -9,6 +9,10 @@ trap 'rm -rf "$T"' EXIT
 export HOME="$T/home"
 export SKYWALKER_HOME="$HOME/Games/skywalker"
 export SKYWALKER_APP="$HOME/Applications/Skywalker Saga.app"
+# no real screen measurement or screen watcher in these checks, unless a check asks for one
+export SKY_REFIT=0
+# the app as a script (the compiled app is checked on CI Macs by test-screens.sh)
+export SKY_OSACOMPILE=/nonexistent
 GAME="LEGO Star Wars - The Skywalker Saga"
 P="$HOME/Games/skywalker-cx"
 STEAM="$P/drive_c/Program Files (x86)/Steam"
@@ -48,10 +52,26 @@ bash "$S" backup
 [ "$(count_backups)" = 2 ] || fail "old backups were not pruned to 2"
 
 echo "-- app icon"
-bash "$S" app
+SKYWALKER_NO_DOCK=1 bash "$S" app
 [ -x "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" ] || fail "launcher missing from the app"
-grep -q "skywalker.sh\" run" "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not call run"
+grep -q '"$L" launch' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not call launch"
+grep -q 'L="${L:-$HOME/Games/skywalker/skywalker.sh}"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not find the launcher through the home folder"
+bash -n "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app's script is broken"
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_APP/Contents/Info.plist"; fi
+[ -s "$SKYWALKER_APP/Contents/Resources/loading.js" ] || fail "the app has no loading window"
+grep -q 'function run(argv)' "$SKYWALKER_APP/Contents/Resources/loading.js" || fail "the loading window script is cut short"
+grep -q '"$J" "$D/logs" "$start"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app does not show the loading window"
+if grep -q LSUIElement "$SKYWALKER_APP/Contents/Info.plist"; then fail "the app hides from the Dock, so its loading window would have no icon"; fi
+if command -v node >/dev/null 2>&1; then node --check "$SKYWALKER_APP/Contents/Resources/loading.js" || fail "the loading window script does not parse"; fi
+# an app made by an older launcher is brought up to date by "launch"
+printf '#!/bin/bash\nexec /bin/bash "$L" launch\n' > "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher"
+rm -f "$SKYWALKER_APP/Contents/Resources/loading.js"
+mkdir -p "$T/fakebin"; printf '#!/bin/bash\necho "$@" >> "%s/lc.txt"\n' "$T" > "$T/fakebin/launchctl"; chmod +x "$T/fakebin/launchctl"
+SKY_LAUNCHCTL="$T/fakebin/launchctl" bash "$S" launch > "$T/refresh.txt" 2>&1 || true
+grep -q 'brought up to date' "$T/refresh.txt" || fail "launch did not bring an old app up to date: $(cat "$T/refresh.txt")"
+[ -s "$SKYWALKER_APP/Contents/Resources/loading.js" ] || fail "the old app did not get its loading window"
+SKY_LAUNCHCTL="$T/fakebin/launchctl" bash "$S" launch > "$T/refresh2.txt" 2>&1 || true
+if grep -q 'brought up to date' "$T/refresh2.txt"; then fail "an app already up to date was rewritten"; fi
 
 echo "-- game detection"
 bash "$S" doctor | tee "$T/doctor.txt"
@@ -351,6 +371,12 @@ case "$*" in
     rm -f "$FAKE_DIR/steam.pid" "$FAKE_DIR/server.pid"
     ;;
   *steam.exe*)
+    # "slow": Steam takes three seconds to appear, as a real one does, and
+    # every Steam that gets started is counted (a real Wine would start two)
+    if [ -f "$FAKE_DIR/slow" ] && ! kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; then
+      echo started >> "$FAKE_DIR/steam-starts.txt"
+      ( exec -a "$0-preloader" sleep 3 )
+    fi
     if ! kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; then
       ( exec -a 'C:\Program Files (x86)\Steam\steam.exe' sleep 300 ) &
       echo $! > "$FAKE_DIR/steam.pid"
@@ -374,6 +400,17 @@ SKY_KEEP_STEAM_MINUTES=0 SKY_STEAM_ARGS="-silent -testflag" bash "$S" run | tee 
 grep -q 'The game is running. It started [0-9]*s after the launcher' "$T/run.txt" || fail "run did not report the start-up time"
 grep -q 'The game has exited' "$T/run.txt" || fail "run did not notice the game ending"
 [ "$(wc -l < "$SKYWALKER_HOME/logs/startup.tsv" | tr -d ' ')" = 1 ] || fail "start-up time was not recorded"
+# what the loading window followed
+ST="$SKYWALKER_HOME/logs/start-stages.txt"
+cat "$ST"
+for want in 'Backing up your saves' 'Fitting the game to your screen' 'Starting Wine' 'The game is loading' 'The game has closed.'; do
+  grep -q "$want" "$ST" || fail "the loading window was not told: $want"
+done
+grep -q '^state=done$' "$SKYWALKER_HOME/logs/start-status" || fail "the last start is not marked as over"
+ls_epoch="$(date -d "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s)"
+st_t0="$(sed -n 's/^t0=//p' "$SKYWALKER_HOME/logs/start-status")"
+[ -n "$st_t0" ] && [ "$st_t0" -le "$ls_epoch" ] && [ "$st_t0" -ge $((ls_epoch - 5)) ] || fail "the status does not carry the start time ($st_t0, start $ls_epoch)"
+grep -q '^expect=90$' "$SKYWALKER_HOME/logs/start-status" || fail "a first start does not expect the usual 90 s: $(grep expect "$SKYWALKER_HOME/logs/start-status")"
 if steam_alive; then fail "Steam was left open although KEEP_STEAM_MINUTES is 0"; fi
 since="$(cat "$SKYWALKER_HOME/logs/last-start")"
 mkdir -p "$STEAM/logs"
@@ -390,6 +427,31 @@ grep -q 'Steam options: -silent -testflag -cef-disable-gpu' "$T/timeline.txt" ||
 grep -q 'bootstrap_log: Verification complete' "$T/timeline.txt" || fail "timeline misses Steam's starter"
 grep -q 'webhelper: Applying workarounds due to GPU process restarts' "$T/timeline.txt" || fail "timeline misses the graphics process restarts"
 grep -q 'content_log: AppID 920210 state changed' "$T/timeline.txt" || fail "timeline misses the game's lines"
+grep -q "The launcher's stages" "$T/timeline.txt" || fail "timeline misses the launcher's own stages"
+# the estimate is the middle of the last five cold starts, ignoring warm ones and failures
+cp "$SKYWALKER_HOME/logs/startup.tsv" "$T/startup.keep"
+printf 'x\tb\t2\t3\t%s\to\n' 207 55 118 26 104 91 >> "$SKYWALKER_HOME/logs/startup.tsv"
+printf 'x\tb\topen\topen\t%s\to\n' 4 6 5 >> "$SKYWALKER_HOME/logs/startup.tsv"
+printf 'x\tb\topen\topen\t-\to\n' >> "$SKYWALKER_HOME/logs/startup.tsv"
+# Steam saying what it does for the game
+{
+  echo "[$since] System startup time: 55.37 seconds"
+  echo "[$since] GameAction [AppID 920210, ActionID 1] : LaunchApp changed task to SynchronizingCloud with \"\""
+} > "$STEAM/logs/console_log.txt"
+# (a file, not "source <(...)": macOS's bash 3.2 cannot source a pipe)
+sed -n '/^# ---------------------------------------------------------------- start progress/,/^play() {/p' "$S" | sed '$d' > "$T/progress-funcs.sh"
+cat > "$T/probe.sh" <<PROBE
+source "$T/progress-funcs.sh"
+LOGS="$SKYWALKER_HOME/logs"
+steam_dir() { echo "$STEAM"; }
+echo "cold=\$(expected_start cold) warm=\$(expected_start warm)"
+st="\$(steam_stage "$since")"; echo "stage=\$st words=\$(steam_stage_words "\$st")"
+PROBE
+bash "$T/probe.sh" | tee "$T/probe.txt"
+grep -q 'cold=91 warm=5' "$T/probe.txt" || fail "the start estimate is off"
+grep -q 'stage=SynchronizingCloud words=Steam is syncing your saves with Steam Cloud' "$T/probe.txt" || fail "Steam's step was not read from its log"
+cp "$T/startup.keep" "$SKYWALKER_HOME/logs/startup.tsv"
+rm -f "$STEAM/logs/console_log.txt"
 if grep -q 'long ago\|1 of 2 KB' "$T/timeline.txt"; then fail "timeline shows lines it should leave out"; fi
 
 echo "-- Steam stays open between games"
@@ -425,6 +487,88 @@ C:\\Program Files (x86)\\Steam\\steam.exe -cef-disable-gpu -foo
 C:\\Program Files (x86)\\Steam\\steam.exe -foo -cef-disable-gpu" ] || { cat "$FAKE_DIR/calls.txt"; fail "the graphics process option was not handled as intended"; }
 bash "$S" stop > /dev/null
 [ ! -f "$SKYWALKER_HOME/steam-idle" ] || fail "stop left the idle ticket behind"
+
+echo "-- Steam kept ready but paused"
+bash "$S" stop > /dev/null 2>&1 || true
+: > "$FAKE_DIR/calls.txt"
+had_launcher=0; [ -f "$SKYWALKER_HOME/skywalker.sh" ] && had_launcher=1
+cp "$S" "$SKYWALKER_HOME/skywalker.sh.ready-test"; mv "$SKYWALKER_HOME/skywalker.sh.ready-test" "$SKYWALKER_HOME/skywalker.sh"
+stat_of() { ps -o stat= -p "$(cat "$FAKE_DIR/$1.pid" 2>/dev/null)" 2>/dev/null | tr -d ' '; }
+is_paused() { case "$(stat_of "$1")" in T*) return 0 ;; *) return 1 ;; esac; }
+SKY_LAUNCHCTL="$T/fakebin/launchctl" bash "$S" ready on | tee "$T/ready1.txt"
+[ -f "$SKYWALKER_HOME/steam.ready" ] || fail "ready on left no mark"
+[ -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail "ready on did not set up the start at log-in"
+bash "$S" ready status | grep -q '^Ready: on' || fail "ready status does not say on"
+# after a game Steam is paused, not closed
+SKY_PAUSE_AFTER_GAME=1 bash "$S" run | tee "$T/ready-run1.txt"
+grep -q 'Steam is paused in 1 seconds' "$T/ready-run1.txt" || fail "the pause after the game was not announced"
+sleep 3
+steam_alive || fail "Steam was closed instead of paused"
+is_paused steam || fail "Steam was not paused after the game (state $(stat_of steam))"
+is_paused server || fail "wineserver was not paused (state $(stat_of server))"
+bash "$S" ready status | grep -q 'Steam paused since' || fail "ready status does not show the pause"
+bash "$S" doctor > "$T/ready-doctor.txt" 2>&1 || true
+grep -q 'Ready: *on (Steam paused' "$T/ready-doctor.txt" || fail "doctor does not show the pause"
+# the next start wakes it and the open Steam starts the game
+SKY_PAUSE_AFTER_GAME=30 bash "$S" run | tee "$T/ready-run2.txt"
+grep -q 'it is running again' "$T/ready-run2.txt" || fail "the paused Steam was not woken"
+grep -q 'Steam is still open, so the game starts straight away' "$T/ready-run2.txt" || fail "the woken Steam was not used"
+grep -q 'Waking Steam' "$SKYWALKER_HOME/logs/start-stages.txt" || fail "the loading window was not told about waking Steam"
+[ "$(grep -c -e '-silent' "$FAKE_DIR/calls.txt")" = 1 ] || fail "Steam was started again instead of woken"
+[ "$(grep -c -e '-applaunch 920210' "$FAKE_DIR/calls.txt")" = 2 ] || fail "expected two game launches"
+if is_paused steam; then fail "Steam is still paused after the second game"; fi
+# stop works on a paused Steam
+bash "$S" pause-steam > /dev/null
+is_paused steam || fail "pause did not pause Steam"
+bash "$S" stop > /dev/null
+sleep 1
+if steam_alive; then fail "stop left a paused Steam behind"; fi
+[ ! -f "$SKYWALKER_HOME/steam-paused" ] || fail "the pause note was left behind"
+# at log-in: Steam starts, signs in, and is paused once it has settled
+rm -f "$STEAM/logs/console_log.txt" "$STEAM/logs/steamui_login.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm | tee "$T/ready-prewarm.txt"
+grep -q 'once it has signed in it is paused' "$T/ready-prewarm.txt" || fail "prewarm did not say it pauses Steam"
+sleep 1
+steam_alive || fail "prewarm did not start Steam"
+sleep 6
+if is_paused steam; then fail "Steam was paused before it had signed in"; fi
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] System startup time: 30.12 seconds" >> "$STEAM/logs/console_log.txt"
+i=0; while ! is_paused steam && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+is_paused steam || fail "Steam was not paused once signed in"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > "$T/ready-prewarm2.txt"
+grep -q 'Steam is ready (paused)' "$T/ready-prewarm2.txt" || fail "prewarm does not see the paused Steam"
+# the sign-in screen counts as settled too (Steam cannot sign in by itself)
+bash "$S" stop > /dev/null
+rm -f "$STEAM/logs/console_log.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > /dev/null
+sleep 2
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] SteamUI: WaitingForCredentials - OK" >> "$STEAM/logs/steamui_login.txt"
+i=0; while ! is_paused steam && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+is_paused steam || fail "Steam was not paused at its sign-in screen"
+# a second prewarm (or a click on the app) while Steam is still appearing
+# waits for that Steam instead of starting another one in the same bottle
+bash "$S" stop > /dev/null
+touch "$FAKE_DIR/slow"; rm -f "$FAKE_DIR/steam-starts.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > /dev/null
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > "$T/ready-prewarm3.txt"
+grep -q 'Steam was already starting; waited for it' "$T/ready-prewarm3.txt" || { cat "$T/ready-prewarm3.txt"; fail "the second prewarm did not wait for the Steam already starting"; }
+[ "$(wc -l < "$FAKE_DIR/steam-starts.txt" | tr -d ' ')" = 1 ] || fail "two prewarms started two Steams"
+bash "$S" stop > /dev/null
+rm -f "$FAKE_DIR/steam-starts.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > /dev/null
+SKY_PAUSE_AFTER_GAME=30 bash "$S" run > "$T/ready-run3.txt"
+grep -q 'Steam is still open, so the game starts straight away' "$T/ready-run3.txt" || { cat "$T/ready-run3.txt"; fail "a start right after prewarm did not use the Steam that was starting"; }
+[ "$(wc -l < "$FAKE_DIR/steam-starts.txt" | tr -d ' ')" = 1 ] || fail "a second Steam was started while the first was still appearing"
+rm -f "$FAKE_DIR/slow"
+# off: Steam is woken and closes after the usual time
+SKY_LAUNCHCTL="$T/fakebin/launchctl" SKY_KEEP_STEAM_MINUTES=0.05 bash "$S" ready off | tee "$T/ready-off.txt"
+[ ! -f "$SKYWALKER_HOME/steam.ready" ] || fail "ready off left the mark"
+[ ! -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail "ready off left the start at log-in"
+if is_paused steam; then fail "ready off did not wake Steam"; fi
+sleep 7
+if steam_alive; then fail "Steam stayed open after ready off"; fi
+bash "$S" ready status | grep -q '^Ready: off' || fail "ready status does not say off"
+[ "$had_launcher" = 1 ] || rm -f "$SKYWALKER_HOME/skywalker.sh"
 
 echo "-- an open Steam that cannot start the game, and leftovers of a Steam that has gone"
 : > "$FAKE_DIR/calls.txt"
@@ -574,16 +718,72 @@ grep -q 'Autostart:    on' "$T/auto-doctor.txt" || fail "doctor does not show au
 bash "$S" autostart off > /dev/null
 [ ! -f "$PL" ] || fail "autostart off left the log-in item"
 grep -q "bootout gui/$(id -u)/io.github.jeswr.skywalker.prewarm" "$FAKE_DIR/launchctl.txt" || fail "macOS was not told to drop the log-in item"
+echo "-- the app hands the start to a macOS job of its own"
+bash "$SKYWALKER_HOME/skywalker.sh" launch > "$T/launch.txt"
+grep -q "bootstrap gui/$(id -u) $SKYWALKER_HOME/run-job.plist" "$FAKE_DIR/launchctl.txt" || fail "the start was not handed to macOS"
+grep -q '<string>run</string>' "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the game"
+# (macOS's temporary folder is reached through a link: /var is /private/var)
+grep -q "<string>$(cd "$SKYWALKER_HOME" && pwd -P)/skywalker.sh</string>" "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the installed launcher: $(grep -A2 ProgramArguments "$SKYWALKER_HOME/run-job.plist" | tr -d '\n')"
+grep -q '<key>AbandonProcessGroup</key><true/>' "$SKYWALKER_HOME/run-job.plist" || fail "the job would take the game down with it"
+if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_HOME/run-job.plist"; fi
 rm -f "$SKYWALKER_HOME/skywalker.sh"
 
-echo "-- the game's screen settings are held"
+echo "-- the game is fitted to the screen it opens on"
 CFG="$(dirname "$SAVES")/PCCONFIG.TXT"
+printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nWindowLeft\t-1344\r\nWindowTop\t-42\r\nWindowed 0\r\nFullscreenMonitorIndex\t0\r\nBorderlessWindow 1\r\nFullscreenWindow 1\r\nScreenRefreshRate 60\r\nAspectRatio 3\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$CFG"
+cp "$CFG" "$T/good.txt"
+BUILTIN='main=1 size=1440x900 hz=60 pixels=2880x1800 builtin=1 mirror=0 screens=1 name=Built-in Retina Display'
+PROJ='main=3 size=1920x1080 hz=60 pixels=1920x1080 builtin=0 mirror=1 screens=2 name=EPSON PJ'
+bash "$S" display show > "$T/disp0.txt"
+grep -q '^Way:     auto' "$T/disp0.txt" || fail "auto is not the default way"
+SKY_SCREEN_LINE="$BUILTIN" bash "$S" display check > "$T/fit0.txt"
+grep -q 'WindowLeft -1344 -> 0' "$T/fit0.txt" || fail "a window left on an old monitor was not brought back"
+printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nWindowLeft\t0\r\nWindowTop\t0\r\nWindowed 0\r\nFullscreenMonitorIndex\t0\r\nBorderlessWindow 1\r\nFullscreenWindow 1\r\nScreenRefreshRate 60\r\nAspectRatio 3\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$T/fit-builtin.txt"
+cmp -s "$CFG" "$T/fit-builtin.txt" || { od -c "$CFG" | head -n 30; fail "the built-in screen fit is not exact"; }
+SKY_SCREEN_LINE="$BUILTIN" bash "$S" display check > "$T/fit1.txt"
+[ ! -s "$T/fit1.txt" ] || fail "a file that already fits was changed: $(cat "$T/fit1.txt")"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display check > "$T/fit2.txt"
+grep -q 'Fitting the game to mirrored screens (EPSON PJ), 1920x1080 at 60 Hz' "$T/fit2.txt" || fail "the projector was not named: $(cat "$T/fit2.txt")"
+grep -q 'ScreenWidth 1440 -> 1920' "$T/fit2.txt" || fail "the projector's width was not used"
+sed 's/1440/1920/g; s/900/1080/g' "$T/fit-builtin.txt" > "$T/fit-proj.txt"
+cmp -s "$CFG" "$T/fit-proj.txt" || { od -c "$CFG" | head -n 30; fail "the projector fit is not exact (or another line was touched)"; }
+# a 75 Hz monitor and a 4:3 monitor that macOS runs at 1344x1008
+SKY_SCREEN_LINE='main=5 size=1344x1008 hz=75 pixels=2688x2016 builtin=0 mirror=0 screens=2' bash "$S" display check > /dev/null
+grep -q $'^ScreenWidth 1344\r$' "$CFG" && grep -q $'^ScreenRefreshRate 75\r$' "$CFG" || fail "a 4:3 75 Hz monitor was not fitted"
+# a screen that reports no refresh rate gets 60
+SKY_SCREEN_LINE='main=5 size=1344x1008 hz=0 pixels=2688x2016 builtin=0 mirror=0 screens=2' bash "$S" display check > /dev/null
+grep -q $'^ScreenRefreshRate 60\r$' "$CFG" || fail "a missing refresh rate did not become 60"
+# MetalFX upscaling: a fraction of the real pixels
+SKY_UPSCALE=1 SKY_SCREEN_LINE="$BUILTIN" bash "$S" display check > /dev/null
+grep -q $'^ScreenWidth 1440\r$' "$CFG" || fail "upscaling did not draw at half the pixels (2880/2)"
+SKY_UPSCALE=1 SKY_SCREEN_LINE='main=1 size=1440x900 hz=60 pixels=2560x1600 builtin=1 mirror=0 screens=1' bash "$S" display check > /dev/null
+grep -q $'^ScreenWidth 1280\r$' "$CFG" || fail "upscaling did not draw at half the pixels (2560/2)"
+# no measurement: the file is left alone
+cp "$CFG" "$T/before-nomeasure.txt"
+SKY_SCREEN_LINE='garbage' bash "$S" display check > "$T/fit3.txt" || true
+cmp -s "$CFG" "$T/before-nomeasure.txt" || fail "the file was changed without a measurement"
+if [ "$(uname -s)" != Darwin ]; then
+  bash "$S" display check > "$T/fit-nom.txt"; grep -q 'Could not measure the screen' "$T/fit-nom.txt" || fail "no word when the screen cannot be measured"
+fi
+n="$(find "$SKYWALKER_HOME/settings-backups" -name 'PCCONFIG-*.TXT' | wc -l | tr -d ' ')"
+[ "$n" -ge 4 ] || fail "not every fit was backed up first ($n)"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display screen > "$T/fit-screen.txt"
+grep -q '   ScreenHeight 1080' "$T/fit-screen.txt" || fail "display screen does not show what the game would get"
+SKY_SCREEN_LINE="$PROJ" bash "$S" doctor > "$T/fit-doctor.txt"
+grep -q 'Display:      auto' "$T/fit-doctor.txt" || fail "doctor does not show auto"
+# a start fits too, and the old "display keep" alone still means keep
+cp "$T/good.txt" "$CFG"
+SKY_SCREEN_LINE="$PROJ" SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/fit-run.txt"
+grep -q 'Fitting the game to mirrored screens' "$T/fit-run.txt" || fail "run did not fit the game"
+cmp -s "$CFG" "$T/fit-proj.txt" || fail "run did not fit the game exactly"
+rm -rf "$SKYWALKER_HOME/settings-backups"
+
+echo "-- the game's screen settings are held"
 printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nBorderlessWindow 1\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$CFG"
 cp "$CFG" "$T/good.txt"
-bash "$S" display show > "$T/disp0.txt"
-grep -q 'Kept: nothing' "$T/disp0.txt" || fail "display show reports kept settings before any were kept"
+bash "$S" display off > /dev/null
 bash "$S" display check
-cmp -s "$CFG" "$T/good.txt" || fail "the settings file was changed although nothing is kept"
+cmp -s "$CFG" "$T/good.txt" || fail "the settings file was changed although the way is off"
 bash "$S" display keep > "$T/disp1.txt"
 grep -q '   ScreenWidth 1440' "$T/disp1.txt" || fail "display keep did not list the screen width"
 grep -q '   WindowWidth 1440' "$T/disp1.txt" || fail "display keep did not list the window width"
@@ -608,10 +808,18 @@ sleep 1
 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/disp-run.txt"
 grep -q "screen settings had changed and were put back" "$T/disp-run.txt" || fail "run did not put the screen settings back"
 cmp -s "$CFG" "$T/want.txt" || fail "run left the drifted screen settings"
+# an install from before display.mode: display.keep alone means keep
+rm -f "$SKYWALKER_HOME/display.mode"
+bash "$S" display show > "$T/disp-old.txt"
+grep -q '^Way:     keep' "$T/disp-old.txt" || fail "an old display.keep is not honoured"
 bash "$S" display off > /dev/null
 cp "$T/drift.txt" "$CFG"
 bash "$S" display check
 cmp -s "$CFG" "$T/drift.txt" || fail "display off did not stop the reset"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display auto > "$T/disp-auto.txt"
+grep -q 'Right now that is mirrored screens' "$T/disp-auto.txt" || fail "display auto does not say what the screen is"
+grep -q $'^ScreenWidth 1920\r$' "$CFG" || fail "display auto did not fit at once"
+[ "$(cat "$SKYWALKER_HOME/display.mode")" = auto ] || fail "display auto was not remembered"
 
 echo "-- the bottle update that Wine does once per build"
 bash "$S" stop > /dev/null
