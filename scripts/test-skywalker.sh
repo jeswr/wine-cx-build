@@ -582,7 +582,8 @@ echo "-- the app hands the start to a macOS job of its own"
 bash "$SKYWALKER_HOME/skywalker.sh" launch > "$T/launch.txt"
 grep -q "bootstrap gui/$(id -u) $SKYWALKER_HOME/run-job.plist" "$FAKE_DIR/launchctl.txt" || fail "the start was not handed to macOS"
 grep -q '<string>run</string>' "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the game"
-grep -q "<string>$SKYWALKER_HOME/skywalker.sh</string>" "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the installed launcher"
+# (macOS's temporary folder is reached through a link: /var is /private/var)
+grep -q "<string>$(cd "$SKYWALKER_HOME" && pwd -P)/skywalker.sh</string>" "$SKYWALKER_HOME/run-job.plist" || fail "the job does not run the installed launcher: $(grep -A2 ProgramArguments "$SKYWALKER_HOME/run-job.plist" | tr -d '\n')"
 grep -q '<key>AbandonProcessGroup</key><true/>' "$SKYWALKER_HOME/run-job.plist" || fail "the job would take the game down with it"
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_HOME/run-job.plist"; fi
 rm -f "$SKYWALKER_HOME/skywalker.sh"
