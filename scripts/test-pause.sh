@@ -72,6 +72,9 @@ echo "-- setting up the stand-in game"
 mkdir -p "$GAMEDIR"
 cp "$GAME_SRC" "$GAMEDIR/FAKEGAME_DX11.exe"
 printf '"AppState"\n{\n\t"appid"\t\t"920210"\n\t"installdir"\t\t"Fake Game"\n}\n' > "$STEAM/steamapps/appmanifest_920210.acf"
+# as with the real game: DXMT (Direct3D 11 on Metal) goes into the game's folder
+/bin/bash "$SKY" graphics split > "$OUT/graphics.txt" 2>&1 || true
+ls "$GAMEDIR" | sed 's/^/  game folder: /'
 SETMODE="$OUT/setmode"
 /usr/bin/swiftc -O -o "$SETMODE" "$HERE/setmode.swift" > /dev/null 2>&1 || SETMODE=""
 START_MODE=""
