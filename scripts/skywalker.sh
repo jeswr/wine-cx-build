@@ -1256,6 +1256,7 @@ refresh_app() {
 # $1 = where the launcher is ("$HOME/..." is taken from the home folder of whoever opens the app)
 loading_js() {
   local l="$1"
+  # shellcheck disable=SC2088  # a literal "~/" for the JavaScript, which expands it
   case "$l" in '$HOME/'*) l="~/${l#\$HOME/}" ;; esac
   l="$(printf '%s' "$l" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
   printf "const LAUNCHER = '%s';\n" "$l"
