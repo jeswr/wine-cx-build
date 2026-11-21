@@ -189,12 +189,23 @@ time_round() {
 # Steam reaches its sign-in screen (no account here) and the launcher pauses
 # it. Checks that paused programs use no processor time, that a woken Steam
 # still answers, and that stop and "ready off" clean up.
+LAUNCHCTL_BIN=/bin/launchctl
 wine_cmds() { /bin/ps -axww -o "$1",command= | grep -E ' [A-Za-z]:[\\]|/[w]ineserver'; }
 cpu_total() {
   wine_cmds cputime= | awk '{ n = split($1, a, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + a[i]; t += s } END { printf "%.2f", t }'
 }
 states() { wine_cmds stat= | awk '{ print substr($1, 1, 1) }' | sort | uniq -c | awk '{ printf "%s x%s  ", $2, $1 }'; }
 steam_count() { /bin/ps -axww -o command= | grep -c -i -E '[\\]steam\.exe( |$)' || true; }
+
+ready_logs() {
+  mkdir -p "$OUT/ready-steam"
+  cp "$STEAM_DIR"/logs/*.txt "$OUT/ready-steam/" 2>/dev/null || true
+  cp "$SKYWALKER_HOME"/logs/autostart.log "$SKYWALKER_HOME"/logs/prewarm.log "$SKYWALKER_HOME"/logs/launcher.log "$OUT/ready-steam/" 2>/dev/null || true
+  for f in "$SKYWALKER_HOME"/logs/steam-*.log "$SKYWALKER_HOME"/logs/watchdog*.log; do
+    [ -f "$f" ] && tail -c 400000 "$f" > "$OUT/ready-steam/$(basename "$f")"
+  done
+  cp "$SKYWALKER_HOME/config.env" "$OUT/ready-steam/" 2>/dev/null || true
+}
 
 ready_test() {
   local rc=0 t c1 c2 since t0 ack mem helpers0 helpers1
@@ -209,12 +220,19 @@ ready_test() {
   t=0
   while [ "$t" -lt 300 ]; do
     sleep 5; t=$((t + 5))
+    if [ $((t % 15)) = 0 ]; then
+      { echo "== +${t}s $(date +%H:%M:%S) idle=$(cat "$SKYWALKER_HOME/steam-idle" 2>/dev/null)"; wine_cmds pid=,stat=,pcpu= | cut -c1-220; } >> "$OUT/ready-wait.log"
+      note "+${t}s: $(states)"
+    fi
     [ -f "$SKYWALKER_HOME/steam-paused" ] && break
   done
   note "after ${t}s: Wine programs by state: $(states)"
-  cat "$SKYWALKER_HOME/logs/autostart.log" 2>/dev/null | tail -n 5
+  note "autostart.log:"; tail -n 8 "$SKYWALKER_HOME/logs/autostart.log" 2>/dev/null
+  note "prewarm.log:"; tail -n 15 "$SKYWALKER_HOME/logs/prewarm.log" 2>/dev/null | cut -c1-300
+  "$LAUNCHCTL_BIN" print "gui/$(id -u)/io.github.jeswr.skywalker.prewarm" 2>&1 | grep -E 'state|runs|last exit|pid' | head -n 8
   grep -a 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null | head -n 1
-  [ -f "$SKYWALKER_HOME/steam-paused" ] || { fail_r "Steam was not paused within 300 s of ready on"; /bin/bash "$L" stop; return 1; }
+  tail -n 5 "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null
+  [ -f "$SKYWALKER_HOME/steam-paused" ] || { fail_r "Steam was not paused within 300 s of ready on"; ready_logs; /bin/bash "$L" stop; return 1; }
   /bin/bash "$L" ready status
   /bin/bash "$L" windows > "$OUT/ready-windows-before.txt" 2>&1
   helpers0="$(helpers)"
@@ -264,9 +282,7 @@ ready_test() {
   [ "$(wine_cmds pid= | wc -l | tr -d ' ')" = 0 ] || { fail_r "Wine programs left after stop: $(states)"; wine_cmds stat= | cut -c1-200; }
   /bin/bash "$L" ready off
   [ ! -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail_r "ready off left the log-in item"
-  mkdir -p "$OUT/ready-steam"
-  cp "$STEAM_DIR"/logs/*.txt "$OUT/ready-steam/" 2>/dev/null || true
-  cp "$SKYWALKER_HOME"/logs/autostart.log "$SKYWALKER_HOME"/logs/prewarm.log "$OUT/ready-steam/" 2>/dev/null || true
+  ready_logs
   if [ "$rc" = 0 ]; then note "READY TEST PASSED"; else note "READY TEST FAILED"; fi
   return "$rc"
 }
