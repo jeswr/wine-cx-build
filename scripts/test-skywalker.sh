@@ -428,8 +428,10 @@ printf 'x\tb\topen\topen\t-\to\n' >> "$SKYWALKER_HOME/logs/startup.tsv"
   echo "[$since] System startup time: 55.37 seconds"
   echo "[$since] GameAction [AppID 920210, ActionID 1] : LaunchApp changed task to SynchronizingCloud with \"\""
 } > "$STEAM/logs/console_log.txt"
+# (a file, not "source <(...)": macOS's bash 3.2 cannot source a pipe)
+sed -n '/^# ---------------------------------------------------------------- start progress/,/^play() {/p' "$S" | sed '$d' > "$T/progress-funcs.sh"
 cat > "$T/probe.sh" <<PROBE
-source <(sed -n '/^# ---------------------------------------------------------------- start progress/,/^play() {/p' "$S" | sed '\$d')
+source "$T/progress-funcs.sh"
 LOGS="$SKYWALKER_HOME/logs"
 steam_dir() { echo "$STEAM"; }
 echo "cold=\$(expected_start cold) warm=\$(expected_start warm)"
