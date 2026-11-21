@@ -16,10 +16,16 @@
 #                                split (default): DXMT for the game and Wine's own Direct3D for
 #                                Steam; dxmt or wine: one of them for everything; d3dmetal: Apple's
 #                                D3DMetal from your own copy of the Game Porting Toolkit (GPTK_DIR)
-#   skywalker.sh display keep|show|off
-#                                keep: remember the game's screen and window settings as they
-#                                are now and put them back before each start if something
-#                                changed them (an external monitor does); off: stop doing that
+#   skywalker.sh display auto|keep|off|show|screen
+#                                auto (default): fit the game to the screen it opens on (built-in,
+#                                monitor, projector, mirrored) at every start, and fit its window
+#                                again if the screens change while it runs; keep: always put back
+#                                the screen settings the game has now; off: leave them alone;
+#                                screen: show what the main screen is and what the game would get
+#   skywalker.sh refit           fit the running game's window to the main screen now
+#   skywalker.sh app             make the app (with the game's icon) and put it in the Dock,
+#                                replacing older or CrossOver game icons there
+#   skywalker.sh dock            only the Dock part of that
 #   skywalker.sh prewarm [min]   start Steam now, without a window and without the game, so that
 #                                the next "run" skips Steam's slow start; it closes again after
 #                                PREWARM_MINUTES (or the minutes given) if the game is not played
@@ -113,6 +119,11 @@ HUD=0                    # 1 = show Apple's frame counter
 # Wine's error lines on. Slower; not for normal play.
 GFX_DEBUG=0
 
+# 1 = while the game runs, notice when the screens change (a monitor or
+# projector plugged in or out, mirroring switched) and fit the game's window
+# to the new screen. 0 = only fit at the start. See "display".
+REFIT=1
+
 # Steam stays open this many minutes after the game ends, so that the next
 # start skips Steam's own slow start. 0 = close Steam with the game.
 KEEP_STEAM_MINUTES=30
@@ -145,8 +156,9 @@ load_conf() {
   : "${GPTK_DIR:=$HOME/Games/gptk}" "${D3DMETAL_HOOK:=0}" "${PREWARM_MINUTES:=120}"
   : "${GAME_ARGS=-skipvideos}" "${GFX_DEBUG:=0}" "${WARM_WAIT:=45}" "${STEAM_OWN_D3D:=0}"
   # which lines of the game's settings file "display keep" looks after (by the first word of the line)
-  : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window)?|AspectRatio)\$}"
-  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D GFX_DEBUG; do
+  : "${DISPLAY_KEYS:=^(Screen(Width|Height|RefreshRate|Left|Top)|Window(Width|Height|Left|Top|ed)|BorderlessWindow|Full[Ss]creen(Window|MonitorIndex)?|AspectRatio)\$}"
+  : "${REFIT:=1}"
+  for k in MSYNC UPSCALE UPSCALE_FACTOR FPS_CAP AVX HUD STEAM_ARGS STEAM_GPU PREFIX PROC_HEADROOM KEEP_STEAM_MINUTES GPTK_DIR D3DMETAL_HOOK DISPLAY_KEYS PREWARM_MINUTES WARM_WAIT STEAM_OWN_D3D GFX_DEBUG REFIT; do
     v="SKY_$k"
     if [ -n "${!v:-}" ]; then eval "$k=\${$v}"; fi
   done
@@ -441,12 +453,27 @@ backup_saves() {
 
 # ---------------------------------------------------------------- display
 
-# The game keeps its settings in PCCONFIG.TXT, one "Name value" per line. When
-# the screens change (an external monitor is plugged in or out) the game
-# rewrites the screen and window lines and keeps the new values for good.
-# "display keep" notes those lines as they are now, and every start puts them
-# back if they differ. No other line of the file is ever touched.
+# The game keeps its settings in PCCONFIG.TXT, one "Name value" per line. Its
+# screen and window lines decide the size of the picture. The launcher looks
+# after them in one of three ways ("display auto|keep|off", kept in display.mode):
+#
+#   auto (the default): before every start, the screen the game will open on is
+#     measured (the Mac's main screen: the one with the menu bar, or the mirrored
+#     picture when screens are mirrored) and the lines are set to fill exactly
+#     that screen, borderless. The built-in screen, a monitor and a projector each
+#     get their own size. While the game runs, a change of screens (a monitor or
+#     projector plugged in or out, mirroring switched, the resolution changed) is
+#     noticed within seconds and the game's window is fitted to the new screen.
+#   keep: the lines noted by "display keep" are put back before every start.
+#   off: the lines are left as the game writes them.
+#
+# No other line of the file is ever touched, and the file is copied to
+# settings-backups before each change.
 DISPLAY_KEEP="$HOME_DIR/display.keep"
+DISPLAY_MODE_FILE="$HOME_DIR/display.mode"
+LAST_FIT="$HOME_DIR/display.last-fit"
+SCREEN_WATCH_PID="$HOME_DIR/.screen-watch.pid"
+SKYFIT="$HOME_DIR/tools/skyfit.exe"
 
 pcconfig() {
   local f
@@ -461,12 +488,23 @@ display_lines() {
   /usr/bin/awk -v re="$DISPLAY_KEYS" '{ sub(/\r$/, "") } NF == 2 && $1 ~ re { print $1, $2 }' "$1"
 }
 
-display_guard() {
-  local f tmp changes dir old
-  [ -f "$DISPLAY_KEEP" ] || return 0
+display_mode() {
+  local m
+  m="$(head -n 1 "$DISPLAY_MODE_FILE" 2>/dev/null | tr -d '[:space:]')"
+  case "$m" in
+    auto|keep|off) echo "$m" ;;
+    # before display.mode existed, "display keep" alone meant keep
+    *) if [ -f "$DISPLAY_KEEP" ]; then echo keep; else echo auto; fi ;;
+  esac
+}
+
+# $1 = a file of "Name value" lines, $2 = what to call them in messages.
+# Gives each line of the game's file with the same name the value from $1,
+# keeping the file's own spacing and line ends. Copies the file first.
+display_apply() {
+  local want="$1" why="$2" f tmp changes dir old
   f="$(pcconfig)" || return 0
   tmp="$HOME_DIR/.pcconfig.new"
-  # a kept line replaces the value of the same name; the line end is left as it was
   /usr/bin/awk -v re="$DISPLAY_KEYS" '
     NR == FNR { keep[$1] = $2; next }
     {
@@ -481,7 +519,7 @@ display_guard() {
         printf "%s %s -> %s\n", w[1], w[2], keep[w[1]] > "/dev/stderr"
         printf "%s%s%s%s\n", w[1], sep, keep[w[1]], cr
       } else print $0
-    }' "$DISPLAY_KEEP" "$f" > "$tmp" 2> "$tmp.changes" || { rm -f "$tmp" "$tmp.changes"; return 0; }
+    }' "$want" "$f" > "$tmp" 2> "$tmp.changes" || { rm -f "$tmp" "$tmp.changes"; return 0; }
   changes="$(tr '\n' ',' < "$tmp.changes" | sed 's/,$//; s/,/, /g')"
   if [ -z "$changes" ] || [ ! -s "$tmp" ]; then
     rm -f "$tmp" "$tmp.changes"
@@ -489,35 +527,301 @@ display_guard() {
   fi
   dir="$HOME_DIR/settings-backups"
   mkdir -p "$dir"
-  cp -p "$f" "$dir/PCCONFIG-$(date +%Y%m%d-%H%M%S).TXT"
-  ls -1 "$dir"/PCCONFIG-*.TXT 2>/dev/null | sort -r | tail -n +11 | while read -r old; do
+  old="$dir/PCCONFIG-$(date +%Y%m%d-%H%M%S).TXT"
+  [ ! -e "$old" ] || old="${old%.TXT}-$$.TXT"
+  cp -p "$f" "$old"
+  ls -1 "$dir"/PCCONFIG-*.TXT 2>/dev/null | sort -r | tail -n +21 | while read -r old; do
     case "$old" in "$dir"/PCCONFIG-*) rm -f "$old" ;; esac
   done
   cat "$tmp" > "$f"
   rm -f "$tmp" "$tmp.changes"
-  say "The game's screen settings had changed and were put back: $changes"
-  say "(To keep new screen settings instead, set them in the game, quit it, then: bash $HOME_DIR/skywalker.sh display keep)"
+  say "$why: $changes"
+}
+
+display_guard() {
+  [ -f "$DISPLAY_KEEP" ] || return 0
+  display_apply "$DISPLAY_KEEP" "The game's screen settings had changed and were put back" || return 0
+}
+
+# Writes the small script that measures the screens, if it is not there or
+# differs. JavaScript for Automation ships with every Mac: nothing to install.
+screens_js() {
+  local f="$HOME_DIR/lib/screens.js"
+  mkdir -p "$HOME_DIR/lib"
+  cat > "$f.new" <<'EOF'
+// The Mac's main screen as Wine sees it. Run with: osascript -l JavaScript screens.js [watch SECS MAXSECS]
+// One line: main=ID size=WxH hz=N pixels=WxH builtin=0|1 mirror=0|1 screens=N name=TEXT
+// "size" is in points, which is what Wine (without its Retina mode) reports to Windows programs.
+// watch: prints that line now and again whenever the main screen changes; stops when its
+// parent process has gone or after MAXSECS.
+ObjC.import('Foundation');
+ObjC.import('CoreGraphics');
+ObjC.import('AppKit');
+ObjC.bindFunction('getppid', ['int', []]);
+
+function out(s) {
+  $.NSFileHandle.fileHandleWithStandardOutput.writeData($(s + '\n').dataUsingEncoding($.NSUTF8StringEncoding));
+}
+
+function count() {
+  try {
+    var n = Ref();
+    n[0] = 0;
+    if ($.CGGetOnlineDisplayList(0, null, n) !== 0) return 0;
+    return n[0];
+  } catch (e) { return 0; }
+}
+
+function line(withName) {
+  var id = $.CGMainDisplayID();
+  var mode = $.CGDisplayCopyDisplayMode(id);
+  var w = 0, h = 0, pw = 0, ph = 0, hz = 0, name = '';
+  if (mode) {
+    w = $.CGDisplayModeGetWidth(mode);
+    h = $.CGDisplayModeGetHeight(mode);
+    pw = $.CGDisplayModeGetPixelWidth(mode);
+    ph = $.CGDisplayModeGetPixelHeight(mode);
+    hz = Math.round($.CGDisplayModeGetRefreshRate(mode));
+    try { $.CGDisplayModeRelease(mode); } catch (e) {}
+  }
+  if (!w) { w = $.CGDisplayPixelsWide(id); h = $.CGDisplayPixelsHigh(id); }
+  if (withName) {
+    try {
+      var screens = $.NSScreen.screens;
+      for (var i = 0; i < screens.count; i++) {
+        var s = screens.objectAtIndex(i);
+        var num = s.deviceDescription.objectForKey('NSScreenNumber');
+        if (num && num.unsignedIntValue == id) {
+          if (!hz) { try { hz = s.maximumFramesPerSecond; } catch (e) {} }
+          try { name = s.localizedName.js; } catch (e) {}
+        }
+      }
+    } catch (e) {}
+  }
+  if (!hz) hz = 60;
+  return 'main=' + id + ' size=' + w + 'x' + h + ' hz=' + hz + ' pixels=' + pw + 'x' + ph +
+    ' builtin=' + ($.CGDisplayIsBuiltin(id) ? 1 : 0) + ' mirror=' + ($.CGDisplayIsInMirrorSet(id) ? 1 : 0) +
+    ' screens=' + count() + (name ? ' name=' + name.replace(/[\r\n]/g, ' ') : '');
+}
+
+// what decides whether the game has to be fitted again
+function key(l) { return l.replace(/ name=.*$/, ''); }
+
+function run(argv) {
+  if (argv[0] !== 'watch') { out(line(true)); return; }
+  var every = Number(argv[1]) || 2, max = Number(argv[2]) || 43200;
+  var parent = $.getppid(), shown = line(true), seen = key(shown), t = 0, pending = '';
+  out(shown);
+  while (t < max) {
+    delay(every);
+    t += every;
+    if ($.getppid() !== parent) return;
+    var now = line(false);
+    if (key(now) === seen) { pending = ''; continue; }
+    // the same new state twice in a row: the change has settled
+    if (key(now) !== pending) { pending = key(now); continue; }
+    seen = pending;
+    pending = '';
+    out(now);
+  }
+}
+EOF
+  if /usr/bin/cmp -s "$f.new" "$f"; then rm -f "$f.new"; else mv "$f.new" "$f"; fi
+  echo "$f"
+}
+
+# One line about the main screen (see screens.js), or nothing if it cannot be measured.
+# SKY_SCREEN_LINE stands in for the measurement (tests).
+screen_now() {
+  local js out
+  if [ -n "${SKY_SCREEN_LINE:-}" ]; then
+    out="$SKY_SCREEN_LINE"
+  else
+    js="$(screens_js)"
+    out="$(bounded_quiet 15 /usr/bin/osascript -l JavaScript "$js" 2>/dev/null | head -n 1)"
+  fi
+  case "$out" in main=*" size="[1-9]*x[1-9]*) echo "$out" ;; *) return 1 ;; esac
+}
+
+# $1 = a screen line, $2 = the field
+screen_field() { printf '%s\n' "$1" | sed -n "s/.* $2=\\([^ ]*\\).*/\\1/p; s/^$2=\\([^ ]*\\).*/\\1/p" | head -n 1; }
+screen_name() { printf '%s\n' "$1" | sed -n 's/.* name=//p'; }
+
+# "the built-in screen", "an external screen (DELL U2419H)", "mirrored screens", in words
+screen_words() {
+  local l="$1" n what
+  n="$(screen_name "$l")"
+  if [ "$(screen_field "$l" mirror)" = 1 ]; then what="mirrored screens"
+  elif [ "$(screen_field "$l" builtin)" = 1 ]; then what="the built-in screen"
+  else what="an external screen"; fi
+  echo "$what${n:+ ($n)}, $(screen_field "$l" size) at $(screen_field "$l" hz) Hz"
+}
+
+# The screen and window lines that fill the screen described by $1, borderless.
+fit_lines() {
+  local l="$1" size w h hz px
+  size="$(screen_field "$l" size)"; w="${size%x*}"; h="${size#*x}"
+  hz="$(screen_field "$l" hz)"
+  case "$hz" in ''|*[!0-9]*|0) hz=60 ;; esac
+  # MetalFX upscaling draws at a fraction of the screen's real pixels
+  if [ "$UPSCALE" = 1 ]; then
+    px="$(screen_field "$l" pixels)"
+    case "$px" in [1-9]*x[1-9]*) w=$(( ${px%x*} / UPSCALE_FACTOR )); h=$(( ${px#*x} / UPSCALE_FACTOR )) ;; esac
+  fi
+  printf '%s %s\n' ScreenWidth "$w" ScreenHeight "$h" WindowWidth "$w" WindowHeight "$h" \
+    WindowLeft 0 WindowTop 0 Windowed 0 BorderlessWindow 1 FullscreenWindow 1 \
+    FullscreenMonitorIndex 0 ScreenRefreshRate "$hz"
+}
+
+# What every start does in "auto": fit the game's settings to the main screen.
+display_fit() {
+  local l f
+  l="$(screen_now)" || { say "Could not measure the screen, so the game's screen settings are left as they are."; return 0; }
+  printf '%s\n' "$l" > "$LAST_FIT"
+  f="$HOME_DIR/.fit-lines"
+  fit_lines "$l" > "$f"
+  if ! pcconfig > /dev/null; then
+    say "Screen: $(screen_words "$l"). The game has not written its settings yet, so it picks its own size this first time."
+    rm -f "$f"
+    return 0
+  fi
+  display_apply "$f" "Fitting the game to $(screen_words "$l")"
+  rm -f "$f"
+}
+
+# What every start does, by the chosen way.
+display_prepare() {
+  case "$(display_mode)" in
+    auto) display_fit ;;
+    keep) display_guard ;;
+  esac
+}
+
+# Runs a command for at most $1 seconds, without saying so when stopped.
+bounded_quiet() {
+  local max="$1" pid t=0
+  shift
+  "$@" &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$t" -ge "$((max * 4))" ]; then kill "$pid" 2>/dev/null; break; fi
+    sleep 0.25; t=$((t + 1))
+  done
+  wait "$pid" 2>/dev/null
+}
+
+# ---- while the game runs
+
+# Starts the watcher of the screens: one small process that asks the window
+# server every 2 seconds and writes a line to $1 when the main screen changes.
+# It ends by itself when the launcher ends or after 12 hours.
+screen_watch_start() {
+  local ev="$1" js
+  screen_watch_stop
+  [ "$(display_mode)" = auto ] || return 1
+  [ "$REFIT" = 1 ] || return 1
+  js="$(screens_js)"
+  : > "$ev"
+  /usr/bin/osascript -l JavaScript "$js" watch 2 43200 >> "$ev" 2>/dev/null &
+  echo $! > "$SCREEN_WATCH_PID"
+}
+
+screen_watch_stop() {
+  local pid
+  pid="$(cat "$SCREEN_WATCH_PID" 2>/dev/null || true)"
+  case "$pid" in ''|*[!0-9]*) ;; *)
+    if /bin/ps -p "$pid" -o command= 2>/dev/null | /usr/bin/grep -q 'screens\.js'; then kill "$pid" 2>/dev/null || true; fi ;;
+  esac
+  rm -f "$SCREEN_WATCH_PID"
+}
+
+# the part of a screen line that decides the fit
+screen_key() { printf '%s\n' "$1" | sed 's/ name=.*$//; s/ hz=[^ ]*//; s/ screens=[^ ]*//'; }
+
+# Fits the game's window to the main screen now (Windows' view of it), twice:
+# the game reacts to a screen change itself and can undo the first fit.
+refit_window() {
+  local log="$1" i
+  if [ ! -f "$SKYFIT" ]; then
+    say "The fitter ($SKYFIT) is missing, so the game keeps its old size until it is started again."
+    return 1
+  fi
+  for i in 2 4; do
+    sleep "$i"
+    game_running || return 0
+    echo "== $(date '+%H:%M:%S') skyfit" >> "$log"
+    WINEDEBUG=-all bounded_quiet 30 "$CUR/bin/wine" "$SKYFIT" "${SKYFIT_MATCH:-SKYWALKERSAGA}" >> "$log" 2>&1
+  done
+  /usr/bin/grep -E '^(monitor|window|result)' "$log" | tail -n 3 | sed 's/^/   /'
+}
+
+# Waits for the game to end; in "auto", fits the game again when the screens change.
+watch_game() {
+  local log="$1" ev="$LOGS/screens.events" seen line
+  if screen_watch_start "$ev"; then
+    seen="$(screen_key "$(cat "$LAST_FIT" 2>/dev/null)")"
+    say "Watching the screens: if they change while you play, the game is fitted to the new one."
+  fi
+  while game_running; do
+    sleep 3
+    [ -f "$SCREEN_WATCH_PID" ] || continue
+    line="$(tail -n 1 "$ev" 2>/dev/null)"
+    case "$line" in main=*) ;; *) continue ;; esac
+    [ "$(screen_key "$line")" = "$seen" ] && continue
+    seen="$(screen_key "$line")"
+    printf '%s\n' "$line" > "$LAST_FIT"
+    say "$(date '+%H:%M:%S') The screens changed: now $(screen_words "$line"). Fitting the game to it."
+    notify "Screen changed: fitting the game to $(screen_field "$line" size)" &
+    refit_window "$log"
+  done
+  screen_watch_stop
+}
+
+cmd_refit() {
+  load_conf
+  need_wine
+  wine_env
+  game_running || die "The game is not running."
+  mkdir -p "$LOGS"
+  [ -f "$SKYFIT" ] || die "The fitter is missing: $SKYFIT"
+  WINEDEBUG=-all bounded 30 "$CUR/bin/wine" "$SKYFIT" "${SKYFIT_MATCH:-SKYWALKERSAGA}"
 }
 
 cmd_display() {
-  local f
+  local f l
   load_conf
   case "${1:-show}" in
+    auto)
+      echo auto > "$DISPLAY_MODE_FILE"
+      say "The game is now fitted to the screen it opens on at every start, and again if the screens change while it runs."
+      if l="$(screen_now)"; then say "Right now that is $(screen_words "$l")."; fi
+      if ! game_running; then display_fit; fi
+      ;;
     keep)
       f="$(pcconfig)" || die "The game has not written its settings file yet. Start the game once, set the picture, quit, then run this again."
       game_running && die "Quit the game first: it writes its settings when it closes."
       display_lines "$f" > "$DISPLAY_KEEP.new"
       [ -s "$DISPLAY_KEEP.new" ] || { rm -f "$DISPLAY_KEEP.new"; die "No screen or window lines found in $f"; }
       mv "$DISPLAY_KEEP.new" "$DISPLAY_KEEP"
-      say "These screen settings are now put back before every start:"
+      echo keep > "$DISPLAY_MODE_FILE"
+      say "These screen settings are now put back before every start (whatever the screen):"
       sed 's/^/   /' "$DISPLAY_KEEP"
+      say "(To fit every screen instead: bash $HOME_DIR/skywalker.sh display auto)"
       ;;
-    check) display_guard ;;   # what every start does
+    check) display_prepare ;;   # what every start does
     off)
-      rm -f "$DISPLAY_KEEP"
+      echo off > "$DISPLAY_MODE_FILE"
       say "Screen settings are left as the game writes them."
       ;;
+    screen)
+      l="$(screen_now)" || die "Could not measure the screen."
+      echo "$l"
+      echo "That is $(screen_words "$l"). The game would get:"
+      fit_lines "$l" | sed 's/^/   /'
+      ;;
     show)
+      echo "Way:     $(display_mode)  (auto: fit the screen at every start and when the screens change; keep: put noted lines back; off: leave them)"
+      if l="$(screen_now)"; then echo "Screen:  $(screen_words "$l")"; else echo "Screen:  could not be measured"; fi
       if f="$(pcconfig)"; then
         echo "Settings file: $f"
         echo "Now:"
@@ -526,13 +830,12 @@ cmd_display() {
         echo "Settings file: not written by the game yet"
       fi
       if [ -f "$DISPLAY_KEEP" ]; then
-        echo "Kept (put back before every start):"
+        echo "Noted by \"display keep\":"
         sed 's/^/   /' "$DISPLAY_KEEP"
-      else
-        echo "Kept: nothing (bash $HOME_DIR/skywalker.sh display keep)"
       fi
+      if [ -f "$SKYFIT" ]; then echo "Fitter:  $SKYFIT"; else echo "Fitter:  missing ($SKYFIT): screen changes are only caught at the next start"; fi
       ;;
-    *) die "Use: skywalker.sh display keep|show|off" ;;
+    *) die "Use: skywalker.sh display auto|keep|off|show|screen" ;;
   esac
 }
 
@@ -625,9 +928,196 @@ install_self() {
   chmod +x "$HOME_DIR/skywalker.sh"
 }
 
+# Writes the helper for the app's icon and the Dock (JavaScript for Automation, part of macOS).
+appicon_js() {
+  local f="$HOME_DIR/lib/appicon.js"
+  mkdir -p "$HOME_DIR/lib"
+  cat > "$f.new" <<'EOF'
+// Helpers for the game's Mac app. Run with: osascript -l JavaScript appicon.js <command> ...
+//   extract EXE OUT.ico   copy the largest icon of a Windows program into an .ico file
+//   round IN OUT.png      a 1024x1024 Mac app icon: the picture on Apple's rounded square, with margins
+//   url PATH              the file URL of PATH, as the Dock stores it
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+
+var B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+function fromB64(s) {
+  var out = [], buf = 0, bits = 0;
+  for (var i = 0; i < s.length; i++) {
+    var c = B64.indexOf(s.charAt(i));
+    if (c < 0) continue;
+    buf = (buf << 6) | c; bits += 6;
+    if (bits >= 8) { bits -= 8; out.push((buf >> bits) & 255); }
+  }
+  return out;
+}
+function toB64(a) {
+  var s = '';
+  for (var i = 0; i < a.length; i += 3) {
+    var n = (a[i] << 16) | ((a[i + 1] || 0) << 8) | (a[i + 2] || 0);
+    s += B64.charAt((n >> 18) & 63) + B64.charAt((n >> 12) & 63) +
+      (i + 1 < a.length ? B64.charAt((n >> 6) & 63) : '=') + (i + 2 < a.length ? B64.charAt(n & 63) : '=');
+  }
+  return s;
+}
+
+function extract(exe, dest) {
+  var d = $.NSData.dataWithContentsOfFileOptionsError(exe, 1, null);
+  if (!d || d.isNil()) throw 'cannot read ' + exe;
+  var size = d.length;
+  function bytes(o, n) {
+    if (o < 0 || o + n > size) throw 'outside the file';
+    return fromB64(d.subdataWithRange($.NSMakeRange(o, n)).base64EncodedStringWithOptions(0).js);
+  }
+  function u16(o) { var b = bytes(o, 2); return b[0] | (b[1] << 8); }
+  function u32(o) { var b = bytes(o, 4); return (b[0] | (b[1] << 8) | (b[2] << 16)) + b[3] * 16777216; }
+  if (u16(0) !== 0x5a4d) throw 'not a Windows program';
+  var pe = u32(0x3c);
+  if (u32(pe) !== 0x4550) throw 'not a Windows program';
+  var nsec = u16(pe + 6), optsz = u16(pe + 20), opt = pe + 24;
+  var ddir = opt + (u16(opt) === 0x10b ? 96 : 112);
+  var rsrc = u32(ddir + 16);
+  if (!rsrc) throw 'no resources';
+  var secs = [];
+  for (var i = 0; i < nsec; i++) {
+    var s = opt + optsz + 40 * i;
+    secs.push([u32(s + 12), Math.max(u32(s + 8), u32(s + 16)), u32(s + 20)]);
+  }
+  function off(rva) {
+    for (var i = 0; i < secs.length; i++)
+      if (rva >= secs[i][0] && rva < secs[i][0] + secs[i][1]) return rva - secs[i][0] + secs[i][2];
+    throw 'bad address';
+  }
+  var base = off(rsrc);
+  function entries(o) {
+    var n = u16(base + o + 12) + u16(base + o + 14), list = [];
+    for (var k = 0; k < n && k < 4096; k++) list.push([u32(base + o + 16 + 8 * k), u32(base + o + 20 + 8 * k)]);
+    return list;
+  }
+  function leaf(t) {
+    for (var depth = 0; t >= 0x80000000 && depth < 4; depth++) t = entries(t - 0x80000000)[0][1];
+    return [off(u32(base + t)), u32(base + t + 4)];
+  }
+  var icons = {}, groups = [];
+  entries(0).forEach(function (e) {
+    if ((e[0] === 3 || e[0] === 14) && e[1] >= 0x80000000) {
+      entries(e[1] - 0x80000000).forEach(function (f) {
+        if (e[0] === 3) icons[f[0]] = leaf(f[1]); else groups.push(leaf(f[1]));
+      });
+    }
+  });
+  if (!groups.length) throw 'no icon in ' + exe;
+  var g = groups[0][0], n = u16(g + 4), best = null;
+  for (var k = 0; k < n; k++) {
+    var e = g + 6 + 14 * k, w = bytes(e, 1)[0] || 256, bpp = u16(e + 6), id = u16(e + 12);
+    if (!icons[id]) continue;
+    if (!best || w > best.w || (w === best.w && bpp > best.bpp)) best = { w: w, bpp: bpp, id: id, e: e };
+  }
+  if (!best) throw 'no icon in ' + exe;
+  var img = icons[best.id];
+  // an .ico file holding that one picture: 6-byte header, one 16-byte entry, the picture
+  var head = [0, 0, 1, 0, 1, 0].concat(bytes(best.e, 8));
+  var len = img[1];
+  head.push(len & 255, (len >> 8) & 255, (len >> 16) & 255, (len >>> 24) & 255, 22, 0, 0, 0);
+  var file = $.NSMutableData.alloc.initWithBase64EncodedStringOptions(toB64(head), 0);
+  file.appendData(d.subdataWithRange($.NSMakeRange(img[0], len)));
+  if (!file.writeToFileAtomically(dest, true)) throw 'cannot write ' + dest;
+  return best.w + 'x' + best.w;
+}
+
+function round(src, dest) {
+  var img = $.NSImage.alloc.initWithContentsOfFile(src);
+  if (!img || img.isNil()) throw 'cannot read ' + src;
+  var S = 1024;
+  var rep = $.NSBitmapImageRep.alloc.initWithBitmapDataPlanesPixelsWidePixelsHighBitsPerSampleSamplesPerPixelHasAlphaIsPlanarColorSpaceNameBytesPerRowBitsPerPixel(
+    null, S, S, 8, 4, true, false, $.NSDeviceRGBColorSpace, 0, 0);
+  var ctx = $.NSGraphicsContext.graphicsContextWithBitmapImageRep(rep);
+  $.NSGraphicsContext.saveGraphicsState;
+  $.NSGraphicsContext.currentContext = ctx;
+  ctx.imageInterpolation = $.NSImageInterpolationHigh;
+  // Apple's app icon grid: an 824-point rounded square in the middle of 1024
+  var r = $.NSMakeRect(100, 100, 824, 824);
+  $.NSBezierPath.bezierPathWithRoundedRectXRadiusYRadius(r, 185, 185).addClip;
+  img.drawInRectFromRectOperationFraction(r, $.NSZeroRect, $.NSCompositingOperationSourceOver, 1);
+  ctx.flushGraphics;
+  $.NSGraphicsContext.restoreGraphicsState;
+  var png = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+  if (!png.writeToFileAtomically(dest, true)) throw 'cannot write ' + dest;
+  return 'ok';
+}
+
+function run(argv) {
+  try {
+    if (argv[0] === 'extract') return extract(argv[1], argv[2]);
+    if (argv[0] === 'round') return round(argv[1], argv[2]);
+    if (argv[0] === 'url') return $.NSURL.fileURLWithPathIsDirectory(argv[1], true).absoluteString.js;
+    return 'unknown command';
+  } catch (e) {
+    return 'error: ' + e;
+  }
+}
+EOF
+  if /usr/bin/cmp -s "$f.new" "$f"; then rm -f "$f.new"; else mv "$f.new" "$f"; fi
+  echo "$f"
+}
+
+# The game's own program: the one in its folder whose name ends in DX11.exe, else the largest.
+game_exe() {
+  local name dir f best="" size bsize=0
+  name="$(game_dir_name || true)"
+  [ -n "$name" ] || return 1
+  dir="$(steam_dir)/steamapps/common/$name"
+  for f in "$dir"/*DX11.exe "$dir"/*.exe; do
+    [ -f "$f" ] || continue
+    case "$f" in *DX11.exe) echo "$f"; return 0 ;; esac
+    size="$(wc -c < "$f" | tr -d ' ')"
+    if [ "$size" -gt "$bsize" ]; then best="$f"; bsize="$size"; fi
+  done
+  [ -n "$best" ] && echo "$best"
+}
+
+# Makes $2 (an .icns file) from the icon inside the Windows program $1:
+# the largest picture, on Apple's rounded square, at every size macOS asks for.
+make_icns() {
+  local exe="$1" dest="$2" js tmp got s
+  js="$(appicon_js)"
+  tmp="$HOME_DIR/cache/icon.$$"
+  rm -rf "$tmp"; mkdir -p "$tmp/AppIcon.iconset"
+  got="$(bounded_quiet 60 /usr/bin/osascript -l JavaScript "$js" extract "$exe" "$tmp/game.ico" 2>&1)"
+  case "$got" in [0-9]*x[0-9]*) ;; *) echo "icon: $got"; rm -rf "$tmp"; return 1 ;; esac
+  /usr/bin/sips -s format png "$tmp/game.ico" --out "$tmp/game.png" > /dev/null 2>&1 || { echo "icon: sips could not read it"; rm -rf "$tmp"; return 1; }
+  case "$(bounded_quiet 60 /usr/bin/osascript -l JavaScript "$js" round "$tmp/game.png" "$tmp/icon1024.png" 2>&1)" in
+    ok) ;; *) cp "$tmp/game.png" "$tmp/icon1024.png" ;;
+  esac
+  for s in 16 32 128 256 512; do
+    /usr/bin/sips -z "$s" "$s" "$tmp/icon1024.png" --out "$tmp/AppIcon.iconset/icon_${s}x${s}.png" > /dev/null 2>&1
+    /usr/bin/sips -z "$((s * 2))" "$((s * 2))" "$tmp/icon1024.png" --out "$tmp/AppIcon.iconset/icon_${s}x${s}@2x.png" > /dev/null 2>&1
+  done
+  if ! /usr/bin/iconutil -c icns "$tmp/AppIcon.iconset" -o "$dest" 2> "$tmp/err"; then
+    echo "icon: iconutil: $(cat "$tmp/err")"; rm -rf "$tmp"; return 1
+  fi
+  echo "icon: from $(basename "$exe") ($got)"
+  rm -rf "$tmp"
+}
+
 create_app() {
-  mkdir -p "$APP/Contents/MacOS" "$LOGS"
-  cat > "$APP/Contents/Info.plist" <<'EOF'
+  local launcher_path exe icon_key="" note
+  # The app finds the launcher through the home folder of whoever opens it,
+  # so it keeps working if the folder is copied to another Mac or user.
+  case "$HOME_DIR" in
+    "$HOME"/*) launcher_path="\$HOME${HOME_DIR#$HOME}/skywalker.sh" ;;
+    *) launcher_path="$HOME_DIR/skywalker.sh" ;;
+  esac
+  rm -rf "$APP.new"
+  mkdir -p "$APP.new/Contents/MacOS" "$APP.new/Contents/Resources" "$LOGS"
+  exe="$(game_exe || true)"
+  if [ -n "$exe" ] && note="$(make_icns "$exe" "$APP.new/Contents/Resources/AppIcon.icns")"; then
+    icon_key="<key>CFBundleIconFile</key><string>AppIcon</string>"
+    say "App icon: the game's own ${note#icon: from }"
+  else
+    say "The game's icon could not be taken from its program (${note:-game not found}); the app gets the plain icon."
+  fi
+  cat > "$APP.new/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -637,21 +1127,98 @@ create_app() {
   <key>CFBundleIdentifier</key><string>local.skywalker-saga.launcher</string>
   <key>CFBundleExecutable</key><string>skywalker-launcher</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>2.0</string>
+  <key>CFBundleVersion</key><string>2</string>
+  $icon_key
   <key>LSApplicationCategoryType</key><string>public.app-category.action-games</string>
+  <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
-  cat > "$APP/Contents/MacOS/skywalker-launcher" <<EOF
+  cat > "$APP.new/Contents/MacOS/skywalker-launcher" <<EOF
 #!/bin/bash
 # Starts the game in the background and returns at once, so the icon does not sit bouncing.
-mkdir -p "$LOGS"
-/usr/bin/nohup /bin/bash "$HOME_DIR/skywalker.sh" run >> "$LOGS/launcher.log" 2>&1 &
+L="\${SKYWALKER_HOME:+\$SKYWALKER_HOME/skywalker.sh}"
+L="\${L:-$launcher_path}"
+if [ ! -f "\$L" ]; then
+  /usr/bin/osascript -e 'display notification "The launcher is missing: ~/Games/skywalker/skywalker.sh" with title "Skywalker Saga"'
+  exit 1
+fi
+mkdir -p "\$(dirname "\$L")/logs"
+/usr/bin/nohup /bin/bash "\$L" run >> "\$(dirname "\$L")/logs/launcher.log" 2>&1 &
 EOF
-  chmod +x "$APP/Contents/MacOS/skywalker-launcher"
+  chmod +x "$APP.new/Contents/MacOS/skywalker-launcher"
+  # swap in the new app in one step, so a Dock icon pointing at it stays valid
+  rm -rf "$APP.old"
+  if [ -d "$APP" ]; then mv "$APP" "$APP.old"; fi
+  mv "$APP.new" "$APP"
+  rm -rf "$APP.old"
   touch "$APP"
-  say "App icon: $APP"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" > /dev/null 2>&1 || true
+  say "App: $APP (Spotlight and Launchpad find it as \"Skywalker Saga\")"
+}
+
+# Puts the app in the Dock, where an older game icon was if there was one,
+# and takes out other game icons there: older copies of this app and the icon
+# CrossOver made for the game (it starts CrossOver, whose trial has ended).
+# The Dock's settings are copied to settings-backups first.
+dock_pin() {
+  local js url plist dir i u n=0 at="" removed="" keep=0 rm_list=""
+  [ -d "$APP" ] || die "The app is missing. Run: bash $HOME_DIR/skywalker.sh app"
+  js="$(appicon_js)"
+  url="$(/usr/bin/osascript -l JavaScript "$js" url "$APP" 2>/dev/null)"
+  case "$url" in file://*) ;; *) die "Could not work out the app's address for the Dock ($url)." ;; esac
+  dir="$HOME_DIR/settings-backups"
+  mkdir -p "$dir"
+  plist="$HOME_DIR/.dock.plist"
+  /usr/bin/defaults export com.apple.dock "$plist" 2>/dev/null || die "Could not read the Dock's settings."
+  cp "$plist" "$dir/dock-$(date +%Y%m%d-%H%M%S).plist"
+  ls -1 "$dir"/dock-*.plist 2>/dev/null | sort -r | tail -n +6 | while read -r i; do
+    case "$i" in "$dir"/dock-*) rm -f "$i" ;; esac
+  done
+  i=0
+  while /usr/libexec/PlistBuddy -c "Print :persistent-apps:$i" "$plist" > /dev/null 2>&1; do
+    u="$(/usr/libexec/PlistBuddy -c "Print :persistent-apps:$i:tile-data:file-data:_CFURLString" "$plist" 2>/dev/null)" || u=""
+    if [ "$u" = "$url" ] && [ "$keep" = 0 ]; then
+      keep=1
+    elif printf '%s' "$u" | /usr/bin/grep -qi 'skywalker'; then
+      rm_list="$i $rm_list"
+      [ -n "$at" ] || at="$i"
+      removed="$removed, $(printf '%s' "$u" | sed 's|/$||; s|.*/||; s|%20| |g; s|%C2%AE||g; s|%E2%84%A2||g')"
+    fi
+    i=$((i + 1))
+    [ "$i" -lt 500 ] || break
+  done
+  if [ "$keep" = 1 ] && [ -z "$rm_list" ]; then
+    rm -f "$plist"
+    say "The Dock already has the game's icon."
+    return 0
+  fi
+  for i in $rm_list; do   # from the last to the first, so the numbers stay right
+    /usr/libexec/PlistBuddy -c "Delete :persistent-apps:$i" "$plist"
+  done
+  if [ "$keep" = 0 ]; then
+    if [ -n "$at" ]; then
+      # each removed entry before $at moved it; $at was the first, so it is still right
+      n="$at"
+    else
+      n="$(( i - $(echo $rm_list | wc -w) ))"
+    fi
+    /usr/libexec/PlistBuddy \
+      -c "Add :persistent-apps:$n dict" \
+      -c "Add :persistent-apps:$n:tile-type string file-tile" \
+      -c "Add :persistent-apps:$n:tile-data dict" \
+      -c "Add :persistent-apps:$n:tile-data:file-label string Skywalker Saga" \
+      -c "Add :persistent-apps:$n:tile-data:file-data dict" \
+      -c "Add :persistent-apps:$n:tile-data:file-data:_CFURLString string $url" \
+      -c "Add :persistent-apps:$n:tile-data:file-data:_CFURLStringType integer 15" \
+      "$plist" || die "Could not add the app to the Dock's settings."
+  fi
+  /usr/bin/defaults import com.apple.dock "$plist" || die "Could not save the Dock's settings."
+  rm -f "$plist"
+  /usr/bin/killall Dock 2>/dev/null || true
+  say "The game is in the Dock${removed:+ (replaced: ${removed#, })}. To take it out: drag it out of the Dock."
 }
 
 cmd_install() {
@@ -1233,7 +1800,7 @@ play() {
   date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
   rm -f "$IDLE"
   backup_saves
-  display_guard
+  display_prepare
   wine_env
   if our_wineserver_running; then
     if steam_running; then
@@ -1313,7 +1880,7 @@ play() {
     say "The game is running. It started ${t_game}s after the launcher (Steam after ${t_steam:-?}s, Steam's browser part after ${t_helper:-?}s)."
     if steam_updated_since "$(cat "$LOGS/last-start")"; then say "Steam updated itself during this start, which is why it took longer than usual."; fi
   fi
-  while game_running; do sleep 5; done
+  watch_game "$log"
   say "The game has exited."
   keep="$(keep_seconds)"
   if [ "$keep" -gt 0 ] && steam_running; then
@@ -1507,6 +2074,7 @@ cmd_stop() {
   load_conf
   need_wine
   wine_env
+  screen_watch_stop
   shutdown_wine
   say "Stopped."
 }
@@ -1677,7 +2245,12 @@ cmd_doctor() {
   if bottle_update_due; then echo "Bottle:       still to be updated for this build (the next start does it and takes a few minutes longer, once; or: skywalker.sh update-bottle)"; fi
   echo "Settings:     $(settings_line) hud=$HUD"
   echo "Game options: from the launcher: $(game_args | sed 's/^$/none/'); from Steam's Launch Options: $(steam_launch_options | sed 's/^$/none/')"
-  if [ -f "$DISPLAY_KEEP" ]; then echo "Display:      kept ($(tr '\n' ',' < "$DISPLAY_KEEP" | sed 's/,$//; s/,/, /g'))"; else echo "Display:      as the game writes it (display keep holds it)"; fi
+  case "$(display_mode)" in
+    auto) echo "Display:      auto (fitted to the main screen at every start$( [ "$REFIT" = 1 ] && [ -f "$SKYFIT" ] && echo ' and when the screens change'))" ;;
+    keep) echo "Display:      kept ($(tr '\n' ',' < "$DISPLAY_KEEP" 2>/dev/null | sed 's/,$//; s/,/, /g'))" ;;
+    off) echo "Display:      as the game writes it" ;;
+  esac
+  if [ -d "$APP" ]; then echo "App:          $APP$( [ -f "$APP/Contents/Resources/AppIcon.icns" ] && echo ' (with the game icon)')"; else echo "App:          missing (skywalker.sh app)"; fi
   echo "Save backups: $(ls -1d "$SAVE_BACKUP_DIR"/20??-??-??_?????? 2>/dev/null | wc -l | tr -d ' ') in $SAVE_BACKUP_DIR"
   if [ -f "$AGENT" ]; then echo "Autostart:    on (Steam is started at log-in for $PREWARM_MINUTES minutes)"; else echo "Autostart:    off"; fi
   if our_wineserver_running; then echo "Wine running: yes"; else echo "Wine running: no"; fi
@@ -1820,10 +2393,13 @@ case "${1:-run}" in
   autostart) shift; cmd_autostart "${1:-status}" ;;
   cpu) shift; cmd_cpu "${1:-30}" ;;
   display) shift; cmd_display "${1:-show}" ;;
+  refit) cmd_refit ;;
+  watch-game) load_conf; need_wine; wine_env; mkdir -p "$LOGS"; watch_game "$LOGS/watch-game.log" ;;   # used by the tests
   bench) shift; cmd_bench "${1:-test}" ;;
   summary) shift; summarise "$@" ;;
   backup) load_conf; backup_saves ;;
-  app) load_conf; create_app ;;
+  app) load_conf; create_app && { [ -n "${SKYWALKER_NO_DOCK:-}" ] || dock_pin; } ;;
+  dock) load_conf; dock_pin ;;
   doctor) cmd_doctor ;;
   windows) cmd_windows ;;
   timeline) cmd_timeline ;;

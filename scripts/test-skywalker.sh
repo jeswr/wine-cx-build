@@ -9,6 +9,8 @@ trap 'rm -rf "$T"' EXIT
 export HOME="$T/home"
 export SKYWALKER_HOME="$HOME/Games/skywalker"
 export SKYWALKER_APP="$HOME/Applications/Skywalker Saga.app"
+# no real screen measurement or screen watcher in these checks, unless a check asks for one
+export SKY_REFIT=0
 GAME="LEGO Star Wars - The Skywalker Saga"
 P="$HOME/Games/skywalker-cx"
 STEAM="$P/drive_c/Program Files (x86)/Steam"
@@ -48,9 +50,11 @@ bash "$S" backup
 [ "$(count_backups)" = 2 ] || fail "old backups were not pruned to 2"
 
 echo "-- app icon"
-bash "$S" app
+SKYWALKER_NO_DOCK=1 bash "$S" app
 [ -x "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" ] || fail "launcher missing from the app"
-grep -q "skywalker.sh\" run" "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not call run"
+grep -q '"$L" run' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not call run"
+grep -q 'L="${L:-$HOME/Games/skywalker/skywalker.sh}"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not find the launcher through the home folder"
+bash -n "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app's script is broken"
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_APP/Contents/Info.plist"; fi
 
 echo "-- game detection"
@@ -576,14 +580,60 @@ bash "$S" autostart off > /dev/null
 grep -q "bootout gui/$(id -u)/io.github.jeswr.skywalker.prewarm" "$FAKE_DIR/launchctl.txt" || fail "macOS was not told to drop the log-in item"
 rm -f "$SKYWALKER_HOME/skywalker.sh"
 
-echo "-- the game's screen settings are held"
+echo "-- the game is fitted to the screen it opens on"
 CFG="$(dirname "$SAVES")/PCCONFIG.TXT"
+printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nWindowLeft\t-1344\r\nWindowTop\t-42\r\nWindowed 0\r\nFullscreenMonitorIndex\t0\r\nBorderlessWindow 1\r\nFullscreenWindow 1\r\nScreenRefreshRate 60\r\nAspectRatio 3\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$CFG"
+cp "$CFG" "$T/good.txt"
+BUILTIN='main=1 size=1440x900 hz=60 pixels=2880x1800 builtin=1 mirror=0 screens=1 name=Built-in Retina Display'
+PROJ='main=3 size=1920x1080 hz=60 pixels=1920x1080 builtin=0 mirror=1 screens=2 name=EPSON PJ'
+bash "$S" display show > "$T/disp0.txt"
+grep -q '^Way:     auto' "$T/disp0.txt" || fail "auto is not the default way"
+SKY_SCREEN_LINE="$BUILTIN" bash "$S" display check > "$T/fit0.txt"
+grep -q 'WindowLeft -1344 -> 0' "$T/fit0.txt" || fail "a window left on an old monitor was not brought back"
+printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nWindowLeft\t0\r\nWindowTop\t0\r\nWindowed 0\r\nFullscreenMonitorIndex\t0\r\nBorderlessWindow 1\r\nFullscreenWindow 1\r\nScreenRefreshRate 60\r\nAspectRatio 3\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$T/fit-builtin.txt"
+cmp -s "$CFG" "$T/fit-builtin.txt" || { od -c "$CFG" | head -n 30; fail "the built-in screen fit is not exact"; }
+SKY_SCREEN_LINE="$BUILTIN" bash "$S" display check > "$T/fit1.txt"
+[ ! -s "$T/fit1.txt" ] || fail "a file that already fits was changed: $(cat "$T/fit1.txt")"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display check > "$T/fit2.txt"
+grep -q 'Fitting the game to mirrored screens (EPSON PJ), 1920x1080 at 60 Hz' "$T/fit2.txt" || fail "the projector was not named: $(cat "$T/fit2.txt")"
+grep -q 'ScreenWidth 1440 -> 1920' "$T/fit2.txt" || fail "the projector's width was not used"
+sed 's/1440/1920/g; s/900/1080/g' "$T/fit-builtin.txt" > "$T/fit-proj.txt"
+cmp -s "$CFG" "$T/fit-proj.txt" || { od -c "$CFG" | head -n 30; fail "the projector fit is not exact (or another line was touched)"; }
+# a 75 Hz monitor and a 4:3 monitor that macOS runs at 1344x1008
+SKY_SCREEN_LINE='main=5 size=1344x1008 hz=75 pixels=2688x2016 builtin=0 mirror=0 screens=2' bash "$S" display check > /dev/null
+grep -q $'^ScreenWidth 1344\r$' "$CFG" && grep -q $'^ScreenRefreshRate 75\r$' "$CFG" || fail "a 4:3 75 Hz monitor was not fitted"
+# a screen that reports no refresh rate gets 60
+SKY_SCREEN_LINE='main=5 size=1344x1008 hz=0 pixels=2688x2016 builtin=0 mirror=0 screens=2' bash "$S" display check > /dev/null
+grep -q $'^ScreenRefreshRate 60\r$' "$CFG" || fail "a missing refresh rate did not become 60"
+# MetalFX upscaling: a fraction of the real pixels
+SKY_UPSCALE=1 SKY_SCREEN_LINE="$BUILTIN" bash "$S" display check > /dev/null
+grep -q $'^ScreenWidth 1440\r$' "$CFG" || fail "upscaling did not draw at half the pixels (2880/2)"
+SKY_UPSCALE=1 SKY_SCREEN_LINE='main=1 size=1440x900 hz=60 pixels=2560x1600 builtin=1 mirror=0 screens=1' bash "$S" display check > /dev/null
+grep -q $'^ScreenWidth 1280\r$' "$CFG" || fail "upscaling did not draw at half the pixels (2560/2)"
+# no measurement: the file is left alone
+cp "$CFG" "$T/before-nomeasure.txt"
+SKY_SCREEN_LINE='garbage' bash "$S" display check > "$T/fit3.txt" || true
+cmp -s "$CFG" "$T/before-nomeasure.txt" || fail "the file was changed without a measurement"
+if [ "$(uname -s)" != Darwin ]; then
+  bash "$S" display check | grep -q 'Could not measure the screen' || fail "no word when the screen cannot be measured"
+fi
+n="$(find "$SKYWALKER_HOME/settings-backups" -name 'PCCONFIG-*.TXT' | wc -l | tr -d ' ')"
+[ "$n" -ge 4 ] || fail "not every fit was backed up first ($n)"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display screen | grep -q '   ScreenHeight 1080' || fail "display screen does not show what the game would get"
+SKY_SCREEN_LINE="$PROJ" bash "$S" doctor | grep -q 'Display:      auto' || fail "doctor does not show auto"
+# a start fits too, and the old "display keep" alone still means keep
+cp "$T/good.txt" "$CFG"
+SKY_SCREEN_LINE="$PROJ" SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/fit-run.txt"
+grep -q 'Fitting the game to mirrored screens' "$T/fit-run.txt" || fail "run did not fit the game"
+cmp -s "$CFG" "$T/fit-proj.txt" || fail "run did not fit the game exactly"
+rm -rf "$SKYWALKER_HOME/settings-backups"
+
+echo "-- the game's screen settings are held"
 printf 'ScreenWidth 1440\r\nScreenHeight 900\r\nWindowWidth\t1440\r\nWindowHeight\t900\r\nBorderlessWindow 1\r\nScreenSpaceReflections 0\r\nDoFEnabled 0\r\nLanguage en gb\r\n' > "$CFG"
 cp "$CFG" "$T/good.txt"
-bash "$S" display show > "$T/disp0.txt"
-grep -q 'Kept: nothing' "$T/disp0.txt" || fail "display show reports kept settings before any were kept"
+bash "$S" display off > /dev/null
 bash "$S" display check
-cmp -s "$CFG" "$T/good.txt" || fail "the settings file was changed although nothing is kept"
+cmp -s "$CFG" "$T/good.txt" || fail "the settings file was changed although the way is off"
 bash "$S" display keep > "$T/disp1.txt"
 grep -q '   ScreenWidth 1440' "$T/disp1.txt" || fail "display keep did not list the screen width"
 grep -q '   WindowWidth 1440' "$T/disp1.txt" || fail "display keep did not list the window width"
@@ -608,10 +658,17 @@ sleep 1
 SKY_KEEP_STEAM_MINUTES=0 bash "$S" run > "$T/disp-run.txt"
 grep -q "screen settings had changed and were put back" "$T/disp-run.txt" || fail "run did not put the screen settings back"
 cmp -s "$CFG" "$T/want.txt" || fail "run left the drifted screen settings"
+# an install from before display.mode: display.keep alone means keep
+rm -f "$SKYWALKER_HOME/display.mode"
+bash "$S" display show | grep -q '^Way:     keep' || fail "an old display.keep is not honoured"
 bash "$S" display off > /dev/null
 cp "$T/drift.txt" "$CFG"
 bash "$S" display check
 cmp -s "$CFG" "$T/drift.txt" || fail "display off did not stop the reset"
+SKY_SCREEN_LINE="$PROJ" bash "$S" display auto > "$T/disp-auto.txt"
+grep -q 'Right now that is mirrored screens' "$T/disp-auto.txt" || fail "display auto does not say what the screen is"
+grep -q $'^ScreenWidth 1920\r$' "$CFG" || fail "display auto did not fit at once"
+[ "$(cat "$SKYWALKER_HOME/display.mode")" = auto ] || fail "display auto was not remembered"
 
 echo "-- the bottle update that Wine does once per build"
 bash "$S" stop > /dev/null

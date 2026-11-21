@@ -1,0 +1,78 @@
+name: Try screen fitting and the app
+
+# The launcher's screen fitting (at the start and while the game runs), the
+# fitter skyfit.exe, the app with the game's icon and its Dock entry, on CI
+# Macs with a real build. The game itself cannot run here: skyfit.exe in its
+# test mode stands in for it.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/try-screens.yml'
+      - 'scripts/skywalker.sh'
+      - 'scripts/skyfit.c'
+      - 'scripts/setmode.swift'
+      - 'scripts/test-screens.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  try:
+    name: ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-latest]
+    env:
+      TAG: wine-cx-26.3.0-patched-7
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the fitter and a stand-in game with an icon
+        run: |
+          sw_vers; uname -m
+          brew install mingw-w64 > /dev/null
+          x86_64-w64-mingw32-gcc -O1 -Wall -o skyfit.exe scripts/skyfit.c -lgdi32
+          # a 256x256 PNG icon inside the stand-in, as the real game has
+          sips -s format png -z 256 256 /System/Library/CoreServices/CoreTypes.bundle/Contents/Resources/GenericApplicationIcon.icns --out icon256.png
+          python3 - <<'PY'
+          import struct
+          png = open('icon256.png', 'rb').read()
+          open('game.ico', 'wb').write(struct.pack('<HHH', 0, 1, 1) + struct.pack('<BBBBHHII', 0, 0, 0, 0, 1, 32, len(png), 22) + png)
+          PY
+          echo '1 ICON "game.ico"' > game.rc
+          x86_64-w64-mingw32-windres game.rc -O coff -o game.res
+          x86_64-w64-mingw32-gcc -O1 -o icongame.exe scripts/skyfit.c game.res -lgdi32
+          ls -la skyfit.exe icongame.exe
+
+      - name: Install the build with the launcher and make a bottle
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
+          export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          /bin/bash scripts/skywalker.sh install "$TAG"
+          /bin/bash "$SKYWALKER_HOME/skywalker.sh" wine cmd /c "echo bottle-ok" > bottle.out 2>&1 &
+          pid=$!
+          t=0
+          while kill -0 "$pid" 2>/dev/null && [ "$t" -lt 300 ]; do sleep 5; t=$((t + 5)); done
+          /bin/bash "$SKYWALKER_HOME/skywalker.sh" stop || true
+          kill -9 "$pid" 2>/dev/null || true
+          grep -q bottle-ok bottle.out
+
+      - name: Screens, fitting, app and Dock
+        run: |
+          export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
+          mkdir -p selftest-logs
+          cp skyfit.exe selftest-logs/
+          /bin/bash scripts/test-screens.sh "$PWD/skyfit.exe" "$PWD/icongame.exe"
+
+      - name: Upload the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screens-${{ matrix.runner }}
+          path: selftest-logs
+          if-no-files-found: ignore
