@@ -207,32 +207,42 @@ ready_logs() {
   cp "$SKYWALKER_HOME/config.env" "$OUT/ready-steam/" 2>/dev/null || true
 }
 
+# Waits for the launcher to pause Steam, recording Wine's programs. $1 = label, $2 = seconds.
+wait_paused() {
+  local t=0
+  : > "$OUT/ready-wait-$1.log"
+  while [ "$t" -lt "$2" ]; do
+    sleep 5; t=$((t + 5))
+    if [ $((t % 15)) = 0 ]; then
+      { echo "== +${t}s $(date +%H:%M:%S)"; wine_cmds pid=,stat=,pcpu= | cut -c1-220; } >> "$OUT/ready-wait-$1.log"
+      note "$1 +${t}s: $(states)"
+    fi
+    [ -f "$SKYWALKER_HOME/steam-paused" ] && break
+  done
+  note "$1: after ${t}s Wine programs by state: $(states)"
+  grep -a 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null | tail -n 1
+  tail -n 3 "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null
+  [ -f "$SKYWALKER_HOME/steam-paused" ]
+}
+
 ready_test() {
-  local rc=0 t c1 c2 since t0 ack mem helpers0 helpers1
+  local rc=0 c1 c2 since t0 t ack mem helpers0 helpers1
   fail_r() { note "FAIL: $*"; rc=1; }
   # the log-in item gets no SKY_ settings, so the bottle goes in the config file
   echo "PREFIX=\"$SKY_PREFIX\"" >> "$SKYWALKER_HOME/config.env"
   export SKY_PAUSE_AFTER_READY=20
   echo "PAUSE_AFTER_READY=20" >> "$SKYWALKER_HOME/config.env"
   rm -f "$STEAM_DIR"/logs/*.txt
-  note "ready on"
-  /bin/bash "$L" ready on
-  t=0
-  while [ "$t" -lt 300 ]; do
-    sleep 5; t=$((t + 5))
-    if [ $((t % 15)) = 0 ]; then
-      { echo "== +${t}s $(date +%H:%M:%S) idle=$(cat "$SKYWALKER_HOME/steam-idle" 2>/dev/null)"; wine_cmds pid=,stat=,pcpu= | cut -c1-220; } >> "$OUT/ready-wait.log"
-      note "+${t}s: $(states)"
-    fi
-    [ -f "$SKYWALKER_HOME/steam-paused" ] && break
-  done
-  note "after ${t}s: Wine programs by state: $(states)"
-  note "autostart.log:"; tail -n 8 "$SKYWALKER_HOME/logs/autostart.log" 2>/dev/null
-  note "prewarm.log:"; tail -n 15 "$SKYWALKER_HOME/logs/prewarm.log" 2>/dev/null | cut -c1-300
-  "$LAUNCHCTL_BIN" print "gui/$(id -u)/io.github.jeswr.skywalker.prewarm" 2>&1 | grep -E 'state|runs|last exit|pid' | head -n 8
-  grep -a 'WaitingForCredentials - OK' "$STEAM_DIR/logs/steamui_login.txt" 2>/dev/null | head -n 1
-  tail -n 5 "$STEAM_DIR/logs/bootstrap_log.txt" 2>/dev/null
-  [ -f "$SKYWALKER_HOME/steam-paused" ] || { fail_r "Steam was not paused within 300 s of ready on"; ready_logs; /bin/bash "$L" stop; return 1; }
+
+  # A: "ready on" (without registering the log-in item), then prewarm as the log-in item would
+  note "ready on, then prewarm from the shell"
+  SKY_LAUNCHCTL=/usr/bin/true /bin/bash "$L" ready on
+  /bin/bash "$L" prewarm
+  if ! wait_paused prewarm 300; then
+    fail_r "Steam started by prewarm was not paused within 300 s"
+    tail -n 15 "$SKYWALKER_HOME/logs/prewarm.log" 2>/dev/null | cut -c1-300
+    ready_logs; /bin/bash "$L" stop; return 1
+  fi
   /bin/bash "$L" ready status
   /bin/bash "$L" windows > "$OUT/ready-windows-before.txt" 2>&1
   helpers0="$(helpers)"
@@ -280,6 +290,22 @@ ready_test() {
   with_deadline 120 /bin/bash "$L" stop || fail_r "stop of a paused Steam did not finish"
   sleep 5
   [ "$(wine_cmds pid= | wc -l | tr -d ' ')" = 0 ] || { fail_r "Wine programs left after stop: $(states)"; wine_cmds stat= | cut -c1-200; }
+  ready_logs
+  mkdir -p "$OUT/phase-a"; mv "$OUT"/ready-steam "$OUT/phase-a/" 2>/dev/null || true
+
+  # B: the real log-in item (launchd starts prewarm)
+  rm -f "$STEAM_DIR"/logs/*.txt "$SKYWALKER_HOME"/logs/prewarm.log "$SKYWALKER_HOME"/logs/autostart.log
+  note "ready on with the real log-in item"
+  /bin/bash "$L" ready on
+  if wait_paused login-item 300; then
+    note "the log-in item's Steam was paused"
+  else
+    fail_r "Steam started by the log-in item was not paused within 300 s"
+    note "autostart.log:"; tail -n 8 "$SKYWALKER_HOME/logs/autostart.log" 2>/dev/null
+    note "prewarm.log:"; tail -n 15 "$SKYWALKER_HOME/logs/prewarm.log" 2>/dev/null | cut -c1-300
+    "$LAUNCHCTL_BIN" print "gui/$(id -u)/io.github.jeswr.skywalker.prewarm" 2>&1 | grep -E 'state|runs|last exit|pid' | head -n 8
+  fi
+  with_deadline 120 /bin/bash "$L" stop > /dev/null 2>&1 || true
   /bin/bash "$L" ready off
   [ ! -f "$HOME/Library/LaunchAgents/io.github.jeswr.skywalker.prewarm.plist" ] || fail_r "ready off left the log-in item"
   ready_logs
