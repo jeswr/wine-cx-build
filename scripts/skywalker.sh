@@ -3452,7 +3452,7 @@ SKYKEY="$HOME_DIR/tools/skykey.exe"   # presses a key for the game, inside Wine 
 
 hotkey_spec() {
   local s
-  s="$(tr -d ' \n' < "$HOTKEY_FILE" 2>/dev/null)"
+  s="$(cat "$HOTKEY_FILE" 2>/dev/null | tr -d ' \n')"
   echo "${s:-ctrl-option-p}"
 }
 
@@ -3497,6 +3497,8 @@ function parse(spec) {
   return { code: KEYCODES[key], mods: mods };
 }
 
+var DEBUG = $.NSProcessInfo.processInfo.environment.objectForKey('SKY_HOTKEY_DEBUG').js === '1';
+
 function run(argv) {
   var spec = argv[0], launcher = argv[1], maxsecs = parseInt(argv[2] || '43200', 10);
   var k;
@@ -3515,6 +3517,7 @@ function run(argv) {
     // only the system's own events (type 14); a hot key press is subtype 6
     var ev = app.nextEventMatchingMaskUntilDateInModeDequeue(1 << 14, $.NSDate.dateWithTimeIntervalSinceNow(1), $.NSDefaultRunLoopMode, true);
     if (ev && !ev.isNil()) {
+      if (DEBUG) out('event type=' + ev.type + ' subtype=' + ev.subtype + ' data1=' + ev.data1);
       if (ev.type === 14 && ev.subtype === 6) {
         if (Date.now() >= quietUntil) {
           presses++;

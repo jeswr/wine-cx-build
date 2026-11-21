@@ -13,6 +13,7 @@ on:
       - 'scripts/test-pause.sh'
       - 'scripts/skykey.c'
       - 'scripts/postkey.swift'
+      - 'scripts/hotkeyprobe.swift'
   workflow_dispatch:
 
 permissions:

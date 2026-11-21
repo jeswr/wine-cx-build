@@ -187,7 +187,7 @@ tail -n +"$((lines_before + 1))" "$EV" | grep -q 'keydown 0x1b' && ok "the game 
 [ "$(not_frozen)" = 0 ] && ok "and it is paused" || bad "toggle-pause hotkey did not pause"
 with_deadline 60 /bin/bash "$SKY" toggle-pause hotkey > "$OUT/hotkey-toggle2.txt" 2>&1
 grep -q state=resumed "$OUT/hotkey-toggle2.txt" && ok "the second press resumes" || bad "the second press did not resume"
-/bin/bash "$SKY" hotkey listen 240 > "$OUT/hotkey-listen.txt" 2>&1 &
+SKY_HOTKEY_DEBUG=1 /bin/bash "$SKY" hotkey listen 240 > "$OUT/hotkey-listen.txt" 2>&1 &
 HK=$!
 if wait_for 20 grep -q '^registered' "$OUT/hotkey-listen.txt"; then
   sed 's/^/  listener: /' "$OUT/hotkey-listen.txt"
@@ -197,12 +197,15 @@ else
 fi
 POSTKEY="$OUT/postkey"
 if /usr/bin/swiftc -O -o "$POSTKEY" "$HERE/postkey.swift" > "$OUT/postkey-build.txt" 2>&1; then
-  "$POSTKEY" 35 786432 2>&1 | sed 's/^/  postkey: /'
+  "$POSTKEY" 35 ctrl,option 2>&1 | sed 's/^/  postkey: /'
+  if ! wait_for 15 grep -q '^done 1' "$OUT/hotkey-listen.txt"; then
+    "$POSTKEY" 35 ctrl,option session 2>&1 | sed 's/^/  postkey: /'
+  fi
   if wait_for 20 grep -q '^done 1' "$OUT/hotkey-listen.txt"; then
     ok "a key press reached the listener"
     [ "$(not_frozen)" = 0 ] && ok "the hotkey paused the game" || bad "the hotkey ran but the game is not frozen"
     sleep 3
-    "$POSTKEY" 35 786432 > /dev/null 2>&1
+    "$POSTKEY" 35 ctrl,option > /dev/null 2>&1
     f="$(hb frames)"
     if wait_for 20 grep -q '^done 2' "$OUT/hotkey-listen.txt" && wait_for 20 frames_over $((f + 30)); then ok "the second press brought it back"; else bad "the second press did not resume"; fi
   else
@@ -213,6 +216,18 @@ else
 fi
 kill "$HK" 2>/dev/null
 /bin/bash "$SKY" resume > /dev/null 2>&1
+echo "  for information: the same with a compiled Carbon listener (Ctrl-Option-O)"
+if /usr/bin/swiftc -O -o "$OUT/hotkeyprobe" "$HERE/hotkeyprobe.swift" > "$OUT/probe-build.txt" 2>&1; then
+  "$OUT/hotkeyprobe" 31 6144 40 > "$OUT/probe.txt" 2>&1 &
+  wait_for 10 grep -q registered "$OUT/probe.txt"
+  "$POSTKEY" 31 ctrl,option > /dev/null 2>&1
+  sleep 3
+  grep -q 'probe pressed' "$OUT/probe.txt" || "$POSTKEY" 31 ctrl,option session > /dev/null 2>&1
+  sleep 3
+  sed 's/^/  probe: /' "$OUT/probe.txt"
+else
+  info "the probe did not build: $(tail -n 3 "$OUT/probe-build.txt")"
+fi
 sed 's/^/  listener: /' "$OUT/hotkey-listen.txt" | tail -n 6
 
 echo "-- a quit request while paused (what a restart or log-out sends)"
