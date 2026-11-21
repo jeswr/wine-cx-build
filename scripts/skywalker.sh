@@ -2195,6 +2195,29 @@ steam_settled() {
 # PAUSE_AFTER_READY seconds more and pause it, unless a game has started or
 # another timer has taken over (the same ticket as the idle timer).
 # $1 = start time ("2026-11-21 15:42:17")
+# Steam takes a few seconds to appear after a prewarm starts it. A second start
+# in that gap (a prewarm right after "ready on", or a click on the app) would
+# start a second Steam in the same bottle: two Steams fight over one set of
+# shared files and the web helper hangs. So wait for the one already starting.
+steam_starting() {
+  [ -f "$STEAM_STARTED" ] || return 1
+  [ -n "$(/usr/bin/find "$STEAM_STARTED" -mmin -2 2>/dev/null)" ] || return 1
+  [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ] || return 1
+  ! steam_running
+}
+
+wait_steam_starting() {
+  local i
+  steam_starting || return 1
+  for i in $(seq 1 60); do
+    sleep 1
+    steam_running && return 0
+    # nothing of Wine left after a few seconds: that start has failed
+    if [ "$i" -ge 5 ] && [ -z "$(wine_pids)" ]; then return 0; fi
+  done
+  return 0
+}
+
 start_pause_when_ready() {
   local since="$1" ticket
   ticket="$(date +%s)-$$-$RANDOM"
@@ -2416,6 +2439,10 @@ play() {
   ui_status starting "Fitting the game to your screen"
   display_prepare
   wine_env
+  if steam_starting; then
+    ui_status starting "Steam is still starting: waiting for it"
+    wait_steam_starting || true
+  fi
   if our_wineserver_running && steam_running; then UI_EXPECT="$(expected_start warm)"; fi
   if our_wineserver_running; then
     if steam_running; then
@@ -2471,6 +2498,7 @@ play() {
       notify "Starting the game. This can take a minute." &
     fi
     session_sig > "$SESSION"
+    date '+%Y-%m-%d %H:%M:%S' > "$STEAM_STARTED"
     start_watchdog "$log"
     # shellcheck disable=SC2086,SC2046
     run_wine "$STEAM_EXE" $STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS) -applaunch "$APPID" $gargs >> "$log" 2>&1 &
@@ -2595,6 +2623,7 @@ cmd_prewarm() {
   mkdir -p "$LOGS"
   wine_env
   secs="$(/usr/bin/awk -v m="$mins" 'BEGIN { printf "%d", m * 60 }')"
+  if wait_steam_starting; then say "Steam was already starting; waited for it."; fi
   if our_wineserver_running && steam_running; then
     if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
       if wine_paused; then

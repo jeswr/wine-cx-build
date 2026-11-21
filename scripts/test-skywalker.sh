@@ -371,6 +371,12 @@ case "$*" in
     rm -f "$FAKE_DIR/steam.pid" "$FAKE_DIR/server.pid"
     ;;
   *steam.exe*)
+    # "slow": Steam takes three seconds to appear, as a real one does, and
+    # every Steam that gets started is counted (a real Wine would start two)
+    if [ -f "$FAKE_DIR/slow" ] && ! kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; then
+      echo started >> "$FAKE_DIR/steam-starts.txt"
+      ( exec -a "$0-preloader" sleep 3 )
+    fi
     if ! kill -0 "$(cat "$FAKE_DIR/steam.pid" 2>/dev/null)" 2>/dev/null; then
       ( exec -a 'C:\Program Files (x86)\Steam\steam.exe' sleep 300 ) &
       echo $! > "$FAKE_DIR/steam.pid"
@@ -539,6 +545,21 @@ sleep 2
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] SteamUI: WaitingForCredentials - OK" >> "$STEAM/logs/steamui_login.txt"
 i=0; while ! is_paused steam && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
 is_paused steam || fail "Steam was not paused at its sign-in screen"
+# a second prewarm (or a click on the app) while Steam is still appearing
+# waits for that Steam instead of starting another one in the same bottle
+bash "$S" stop > /dev/null
+touch "$FAKE_DIR/slow"; rm -f "$FAKE_DIR/steam-starts.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > /dev/null
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > "$T/ready-prewarm3.txt"
+grep -q 'Steam was already starting; waited for it' "$T/ready-prewarm3.txt" || { cat "$T/ready-prewarm3.txt"; fail "the second prewarm did not wait for the Steam already starting"; }
+[ "$(wc -l < "$FAKE_DIR/steam-starts.txt" | tr -d ' ')" = 1 ] || fail "two prewarms started two Steams"
+bash "$S" stop > /dev/null
+rm -f "$FAKE_DIR/steam-starts.txt"
+SKY_PAUSE_AFTER_READY=1 bash "$S" prewarm > /dev/null
+SKY_PAUSE_AFTER_GAME=30 bash "$S" run > "$T/ready-run3.txt"
+grep -q 'Steam is still open, so the game starts straight away' "$T/ready-run3.txt" || { cat "$T/ready-run3.txt"; fail "a start right after prewarm did not use the Steam that was starting"; }
+[ "$(wc -l < "$FAKE_DIR/steam-starts.txt" | tr -d ' ')" = 1 ] || fail "a second Steam was started while the first was still appearing"
+rm -f "$FAKE_DIR/slow"
 # off: Steam is woken and closes after the usual time
 SKY_LAUNCHCTL="$T/fakebin/launchctl" SKY_KEEP_STEAM_MINUTES=0.05 bash "$S" ready off | tee "$T/ready-off.txt"
 [ ! -f "$SKYWALKER_HOME/steam.ready" ] || fail "ready off left the mark"
