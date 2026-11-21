@@ -187,7 +187,7 @@ EOF
   t_open=$(perl -MTime::HiRes=time -e 'print time')
   env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$HOMEAPP" > "$OUT/open.txt" 2>&1; echo "  open: exit $? $(cat "$OUT/open.txt")"
   lpid=""
-  for i in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     lpid="$(pgrep -f 'Resources/loading.js' | head -n 1)"
     if [ -n "$lpid" ] && windows_of "$lpid" | grep -q '[0-9]x[0-9]'; then break; fi
     sleep 0.25

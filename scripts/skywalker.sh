@@ -2254,7 +2254,7 @@ play() {
     if steam_updated_since "$(cat "$LOGS/last-start")"; then say "Steam updated itself during this start, which is why it took longer than usual."; fi
   fi
   watch_game "$log"
-  ui_status done "The game has closed."
+  ui_status "done" "The game has closed."
   say "The game has exited."
   keep="$(keep_seconds)"
   if [ "$keep" -gt 0 ] && steam_running; then
