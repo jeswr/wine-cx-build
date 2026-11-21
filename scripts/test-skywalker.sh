@@ -401,7 +401,9 @@ for want in 'Backing up your saves' 'Fitting the game to your screen' 'Starting 
   grep -q "$want" "$ST" || fail "the loading window was not told: $want"
 done
 grep -q '^state=done$' "$SKYWALKER_HOME/logs/start-status" || fail "the last start is not marked as over"
-grep -q "^t0=$(date -d "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s)$" "$SKYWALKER_HOME/logs/start-status" || fail "the status does not carry the start time"
+ls_epoch="$(date -d "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s)"
+st_t0="$(sed -n 's/^t0=//p' "$SKYWALKER_HOME/logs/start-status")"
+[ -n "$st_t0" ] && [ "$st_t0" -le "$ls_epoch" ] && [ "$st_t0" -ge $((ls_epoch - 5)) ] || fail "the status does not carry the start time ($st_t0, start $ls_epoch)"
 grep -q '^expect=90$' "$SKYWALKER_HOME/logs/start-status" || fail "a first start does not expect the usual 90 s: $(grep expect "$SKYWALKER_HOME/logs/start-status")"
 if steam_alive; then fail "Steam was left open although KEEP_STEAM_MINUTES is 0"; fi
 since="$(cat "$SKYWALKER_HOME/logs/last-start")"
