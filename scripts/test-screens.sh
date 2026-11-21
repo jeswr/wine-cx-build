@@ -160,14 +160,18 @@ if [ ! -e "$HOME/Games/skywalker/skywalker.sh" ]; then
   # real one, leaves something running (Steam) after it returns
   sed "s|^  run) cmd_run ;;|  run) echo run > '$OUT/app-ran.txt'; ( sleep 8; echo alive > '$OUT/app-child.txt' ) \\& ;;|" "$SKY" > "$HOME/Games/skywalker/skywalker.sh"
   grep -q 'app-ran' "$HOME/Games/skywalker/skywalker.sh" || bad "the stand-in run was not put in"
-  # "open" passes its environment on to the app: without these the app looks
-  # for the launcher in the home folder, as it does on the Mac
-  env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$SKYWALKER_APP" > "$OUT/open.txt" 2>&1; echo "  open: exit $? $(cat "$OUT/open.txt")"
+  # The app made above points at this runner's launcher folder; make the app as
+  # it is made on the Mac, from a launcher in ~/Games/skywalker with no test
+  # settings ("open" also passes its environment on to the app, so clear them)
+  HOMEAPP="$HOME/Applications/Skywalker Saga.app"
+  env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX SKYWALKER_NO_DOCK=1 /bin/bash "$HOME/Games/skywalker/skywalker.sh" app > "$OUT/homeapp.txt" 2>&1 || bad "making the app from ~/Games/skywalker failed: $(tail -n 3 "$OUT/homeapp.txt")"
+  grep -a -q 'Games/skywalker/skywalker.sh' "$HOMEAPP/Contents/MacOS/skywalker-launcher" && ok "the app looks for the launcher in ~/Games/skywalker" || bad "the app does not point at ~/Games/skywalker: $(grep -a 'L=' "$HOMEAPP/Contents/MacOS/skywalker-launcher")"
+  env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$HOMEAPP" > "$OUT/open.txt" 2>&1; echo "  open: exit $? $(cat "$OUT/open.txt")"
   wait_for 20 test -s "$OUT/app-ran.txt" && ok "opening the app runs: skywalker.sh $(cat "$OUT/app-ran.txt")" || bad "opening the app did not run the launcher"
   wait_for 20 test -s "$OUT/app-child.txt" && ok "what the launcher leaves running outlives the app" || bad "macOS ended what the launcher left running"
   cat "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null | sed 's/^/  launcher.log: /'
   log show --last 2m --style compact --predicate 'eventMessage CONTAINS[c] "skywalker"' 2>/dev/null | tail -n 25 | sed 's/^/  log: /'
-  env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$SKYWALKER_APP"; sleep 3
+  env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$HOMEAPP"; sleep 3
   grep -q 'already starting or running' "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null && echo "  (a second click while it ran was ignored)"
   launchctl print "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null | grep -E 'state|last exit' | sed 's/^/  job: /'
   launchctl bootout "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null || true
