@@ -1118,10 +1118,54 @@ app_launcher_path() {
   esac
 }
 
-# Writes the app's text files (not its icon) into the app folder $1.
-# $2 = where the app looks for the launcher
+OSACOMPILE="${SKY_OSACOMPILE:-/usr/bin/osacompile}"
+
+# Makes the app in the folder $1 (replacing it), keeping the game's icon if
+# $1/Contents/Resources/AppIcon.icns is there. $2 = where it looks for the launcher.
+# On a Mac the app is the loading window itself, compiled by osacompile: it
+# opens at once, under the app's name and icon, and then starts the launcher.
+# Without osacompile it is a script that starts the launcher, then the window.
 app_files() {
-  local a="$1" icon_key=""
+  if [ -x "$OSACOMPILE" ]; then app_applet "$1" "$2"; else app_script "$1" "$2"; fi
+}
+
+# $1 = Info.plist, $2 = key, $3 = text
+plist_set() {
+  /usr/libexec/PlistBuddy -c "Set :$2 $3" "$1" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :$2 string $3" "$1"
+}
+
+app_applet() {
+  local a="$1" t b
+  t="$(mktemp -d "${TMPDIR:-/tmp}/skywalker-applet.XXXXXX")" || return 1
+  b="$t/Skywalker Saga.app"
+  loading_js "$2" > "$t/loading.js"
+  if ! "$OSACOMPILE" -l JavaScript -o "$b" "$t/loading.js" > "$t/osacompile.txt" 2>&1; then
+    say "The app could not be compiled: $(cat "$t/osacompile.txt")"
+    rm -rf "$t"
+    return 1
+  fi
+  cp "$t/loading.js" "$b/Contents/Resources/loading-source.js"
+  if [ -s "$a/Contents/Resources/AppIcon.icns" ]; then
+    cp "$a/Contents/Resources/AppIcon.icns" "$b/Contents/Resources/AppIcon.icns"
+    cp "$a/Contents/Resources/AppIcon.icns" "$b/Contents/Resources/applet.icns"
+    rm -f "$b/Contents/Resources/Assets.car"
+    /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$b/Contents/Info.plist" > /dev/null 2>&1 || true
+  fi
+  plist_set "$b/Contents/Info.plist" CFBundleIdentifier local.skywalker-saga.launcher
+  plist_set "$b/Contents/Info.plist" CFBundleName "Skywalker Saga"
+  plist_set "$b/Contents/Info.plist" CFBundleDisplayName "Skywalker Saga"
+  plist_set "$b/Contents/Info.plist" CFBundleShortVersionString 3.0
+  plist_set "$b/Contents/Info.plist" LSApplicationCategoryType public.app-category.action-games
+  /usr/libexec/PlistBuddy -c "Delete :LSUIElement" "$b/Contents/Info.plist" > /dev/null 2>&1 || true
+  # the changes above break the seal that osacompile put on the app: seal it again
+  /usr/bin/codesign --force --deep --sign - "$b" > /dev/null 2>&1 || true
+  rm -rf "$a"
+  mv "$b" "$a"
+  rm -rf "$t"
+}
+
+app_script() {
+  local a="$1" icon_key=""   # $2 = where the app looks for the launcher
   mkdir -p "$a/Contents/MacOS" "$a/Contents/Resources"
   if [ -f "$a/Contents/Resources/AppIcon.icns" ]; then icon_key="<key>CFBundleIconFile</key><string>AppIcon</string>"; fi
   cat > "$a/Contents/Info.plist.new" <<EOF
@@ -1164,39 +1208,63 @@ if [ -f "\$R/loading.js" ] && [ -z "\${SKYWALKER_NO_WINDOW:-}" ]; then
 fi
 EOF
   chmod +x "$a/Contents/MacOS/skywalker-launcher.new"
-  loading_js > "$a/Contents/Resources/loading.js.new"
+  loading_js "$2" > "$a/Contents/Resources/loading.js.new"
   # each file is swapped in whole: the app may be running its script right now
   mv -f "$a/Contents/Info.plist.new" "$a/Contents/Info.plist"
   mv -f "$a/Contents/MacOS/skywalker-launcher.new" "$a/Contents/MacOS/skywalker-launcher"
   mv -f "$a/Contents/Resources/loading.js.new" "$a/Contents/Resources/loading.js"
 }
 
-# Brings an app made by an older launcher up to date (its text files only:
-# the icon and the Dock entry stay). Quiet; returns 0 when nothing was needed.
+# Brings an app made by an older launcher up to date (the icon and the Dock
+# entry stay). Quiet when nothing is needed.
 refresh_app() {
-  local t
+  local t want
   [ -d "$APP/Contents/MacOS" ] || return 0
-  t="$(mktemp -d "${TMPDIR:-/tmp}/skywalker-app.XXXXXX")" || return 0
-  mkdir -p "$t/Contents/Resources"
-  if [ -f "$APP/Contents/Resources/AppIcon.icns" ]; then : > "$t/Contents/Resources/AppIcon.icns"; fi
-  app_files "$t" "$(app_launcher_path)"
-  if ! /usr/bin/cmp -s "$t/Contents/MacOS/skywalker-launcher" "$APP/Contents/MacOS/skywalker-launcher" \
-    || ! /usr/bin/cmp -s "$t/Contents/Resources/loading.js" "$APP/Contents/Resources/loading.js" \
-    || ! /usr/bin/cmp -s "$t/Contents/Info.plist" "$APP/Contents/Info.plist"; then
-    app_files "$APP" "$(app_launcher_path)"
-    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" > /dev/null 2>&1 || true
-    say "The app was brought up to date (loading window)."
+  if [ -x "$OSACOMPILE" ]; then
+    want="$(loading_js "$(app_launcher_path)")"
+    if [ -f "$APP/Contents/MacOS/applet" ] && [ "$(cat "$APP/Contents/Resources/loading-source.js" 2>/dev/null)" = "$want" ]; then
+      return 0
+    fi
+    rm -rf "$APP.new"
+    mkdir -p "$APP.new/Contents/Resources"
+    if [ -s "$APP/Contents/Resources/AppIcon.icns" ]; then cp "$APP/Contents/Resources/AppIcon.icns" "$APP.new/Contents/Resources/"; fi
+    app_applet "$APP.new" "$(app_launcher_path)" || { rm -rf "$APP.new"; return 1; }
+    # swapped in whole (the app may be running): a Dock icon pointing at it stays valid
+    rm -rf "$APP.old"
+    mv "$APP" "$APP.old" && mv "$APP.new" "$APP"
+    rm -rf "$APP.old"
+  else
+    t="$(mktemp -d "${TMPDIR:-/tmp}/skywalker-app.XXXXXX")" || return 0
+    mkdir -p "$t/Contents/Resources"
+    if [ -f "$APP/Contents/Resources/AppIcon.icns" ]; then : > "$t/Contents/Resources/AppIcon.icns"; fi
+    app_script "$t" "$(app_launcher_path)"
+    if /usr/bin/cmp -s "$t/Contents/MacOS/skywalker-launcher" "$APP/Contents/MacOS/skywalker-launcher" \
+      && /usr/bin/cmp -s "$t/Contents/Resources/loading.js" "$APP/Contents/Resources/loading.js" \
+      && /usr/bin/cmp -s "$t/Contents/Info.plist" "$APP/Contents/Info.plist"; then
+      rm -rf "$t"
+      return 0
+    fi
+    rm -rf "$t"
+    app_script "$APP" "$(app_launcher_path)"
   fi
-  rm -rf "$t"
+  touch "$APP"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" > /dev/null 2>&1 || true
+  say "The app was brought up to date (loading window)."
 }
 
-# The loading window (osascript -l JavaScript; see the comments at its top).
+# The loading window (JavaScript for Automation; see the comments at its top).
+# $1 = where the launcher is ("$HOME/..." is taken from the home folder of whoever opens the app)
 loading_js() {
+  local l="$1"
+  case "$l" in '$HOME/'*) l="~/${l#\$HOME/}" ;; esac
+  l="$(printf '%s' "$l" | sed "s/\\\\/\\\\\\\\/g; s/'/\\\\'/g")"
+  printf "const LAUNCHER = '%s';\n" "$l"
   cat <<'EOF'
 // The window the app shows from the moment it is clicked until the game's own
 // window is up. It follows logs/start-status, which the launcher rewrites at
 // every stage of the start, and estimates the time left from earlier starts.
-// Run with: osascript -l JavaScript loading.js LOGSDIR APPSTART [ICON]
+// It is the app itself (compiled with osacompile), or is run by a script with:
+//   osascript -l JavaScript loading.js LOGSDIR APPSTART [ICON]
 // Closing the window only hides the progress: the start carries on.
 ObjC.import('Cocoa');
 ObjC.import('CoreGraphics');
@@ -1276,18 +1344,47 @@ function clock(secs) {
   return Math.floor(secs / 60) + ':' + (s < 10 ? '0' : '') + s;
 }
 
+// Starts the launcher ("launch": it hands the start to macOS as a job of its
+// own and returns), with its output added to logs/launcher.log.
+function startLauncher(launcher, dir) {
+  const fm = $.NSFileManager.defaultManager;
+  fm.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(dir, true, $(), null);
+  const log = dir + '/launcher.log';
+  if (!fm.fileExistsAtPath(log)) fm.createFileAtPathContentsAttributes(log, $(), $());
+  const fh = $.NSFileHandle.fileHandleForWritingAtPath(log);
+  const task = $.NSTask.alloc.init;
+  task.launchPath = '/bin/bash';
+  task.arguments = $([launcher, 'launch']);
+  if (!fh.isNil()) { fh.seekToEndOfFile; task.standardOutput = fh; task.standardError = fh; }
+  task.launch;
+}
+
+// As the app itself (no arguments): the launcher path is set when the app is made.
+// From a script (LOGSDIR APPSTART [ICON]): that script has started the launcher.
 function run(argv) {
-  const dir = argv[0];
-  const appStart = Number(argv[1]) || Date.now() / 1000;
-  const iconPath = argv[2] || '';
+  argv = argv || [];
+  const appMode = !argv.length || typeof argv[0] !== 'string' || argv[0] === '';
   const app = $.NSApplication.sharedApplication;
-  app.setActivationPolicy(0);  // a normal app: it has its Dock icon and comes to the front
-  let img = null;
-  if (iconPath) {
-    img = $.NSImage.alloc.initWithContentsOfFile(iconPath);
-    if (img.isNil()) img = null; else app.applicationIconImage = img;
+  let launcher = '', dir, appStart, iconPath;
+  if (appMode) {
+    const env = ObjC.deepUnwrap($.NSProcessInfo.processInfo.environment) || {};
+    const home = ObjC.unwrap($.NSHomeDirectory());
+    launcher = env.SKYWALKER_HOME ? env.SKYWALKER_HOME + '/skywalker.sh' : LAUNCHER.replace(/^~\//, home + '/');
+    dir = launcher.replace(/\/[^\/]*$/, '') + '/logs';
+    appStart = Date.now() / 1000;
+    iconPath = ObjC.unwrap($.NSBundle.mainBundle.pathForResourceOfType('applet', 'icns')) || '';
+  } else {
+    dir = argv[0];
+    appStart = Number(argv[1]) || Date.now() / 1000;
+    iconPath = argv[2] || '';
+    app.setActivationPolicy(0);  // a normal app: it has its Dock icon and comes to the front
   }
-  app.finishLaunching;
+  let img = null;
+  if (iconPath && $.NSFileManager.defaultManager.fileExistsAtPath(iconPath)) {
+    img = $.NSImage.alloc.initWithContentsOfFile(iconPath);
+    if (img.isNil()) img = null; else if (!appMode) app.applicationIconImage = img;
+  }
+  if (!appMode) app.finishLaunching;
 
   const W = 470, H = 134;
   const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
@@ -1315,6 +1412,16 @@ function run(argv) {
   win.center;
   win.makeKeyAndOrderFront(null);
   app.activateIgnoringOtherApps(true);
+  win.displayIfNeeded;
+  let problem = '';
+  if (appMode) {
+    // the window is up first; then the launcher
+    if (!$.NSFileManager.defaultManager.fileExistsAtPath(launcher)) {
+      problem = 'The launcher is missing: ' + launcher.replace(ObjC.unwrap($.NSHomeDirectory()), '~');
+    } else {
+      try { startLauncher(launcher, dir); } catch (e) { problem = 'The launcher could not be started: ' + e; }
+    }
+  }
 
   const winExpect = median(dir + '/window-times.txt', 25);  // game process to game window
   let runningSince = 0, endAt = 0, lastWindowCheck = 0, failed = false, shown = 1;
@@ -1333,10 +1440,10 @@ function run(argv) {
     if (!fresh) {
       stage.stringValue = 'Getting ready';
       detail.stringValue = clock(now - appStart);
-      if (now - appStart > 30) {
+      if (problem || now - appStart > 30) {
         failed = true;
         title.stringValue = 'The game did not start';
-        stage.stringValue = 'The launcher did not respond.';
+        stage.stringValue = problem || 'The launcher did not respond.';
         detail.stringValue = 'Details: ~/Games/skywalker/logs/launcher.log';
         bar.hidden = true;
         endAt = now + 120;
@@ -1409,7 +1516,7 @@ create_app() {
   else
     say "The game's icon could not be taken from its program (${note:-game not found}); the app gets the plain icon."
   fi
-  app_files "$APP.new" "$launcher_path"
+  app_files "$APP.new" "$launcher_path" || app_script "$APP.new" "$launcher_path"
   # swap in the new app in one step, so a Dock icon pointing at it stays valid
   rm -rf "$APP.old"
   if [ -d "$APP" ]; then mv "$APP" "$APP.old"; fi

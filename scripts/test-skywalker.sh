@@ -11,6 +11,8 @@ export SKYWALKER_HOME="$HOME/Games/skywalker"
 export SKYWALKER_APP="$HOME/Applications/Skywalker Saga.app"
 # no real screen measurement or screen watcher in these checks, unless a check asks for one
 export SKY_REFIT=0
+# the app as a script (the compiled app is checked on CI Macs by test-screens.sh)
+export SKY_OSACOMPILE=/nonexistent
 GAME="LEGO Star Wars - The Skywalker Saga"
 P="$HOME/Games/skywalker-cx"
 STEAM="$P/drive_c/Program Files (x86)/Steam"

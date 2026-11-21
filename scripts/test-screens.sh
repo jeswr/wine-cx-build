@@ -153,6 +153,19 @@ pos=$(/usr/libexec/PlistBuddy -c 'Print :persistent-apps' "$OUT/dock-after.plist
 ls "$SKYWALKER_HOME/settings-backups"/dock-*.plist > /dev/null 2>&1 && ok "the Dock's settings were backed up" || bad "no Dock backup"
 sleep 3
 screencapture -x "$OUT/dock.png" || true
+[ -x "$SKYWALKER_APP/Contents/MacOS/applet" ] && ok "the app is compiled (osacompile)" || bad "the app is not compiled: $(ls "$SKYWALKER_APP/Contents/MacOS")"
+cmp -s "$SKYWALKER_APP/Contents/Resources/AppIcon.icns" "$SKYWALKER_APP/Contents/Resources/applet.icns" && ok "the compiled app shows the game's icon" || bad "the compiled app has another icon"
+# an app from an older launcher is brought up to date by "launch", icon and all
+echo '// older' >> "$SKYWALKER_APP/Contents/Resources/loading-source.js"
+SKY_LAUNCHCTL=/usr/bin/true /bin/bash "$SKY" launch > "$OUT/refresh.txt" 2>&1 || true
+if grep -q 'brought up to date' "$OUT/refresh.txt" && ! grep -q older "$SKYWALKER_APP/Contents/Resources/loading-source.js" \
+   && cmp -s "$SKYWALKER_APP/Contents/Resources/AppIcon.icns" "$SKYWALKER_APP/Contents/Resources/applet.icns"; then
+  ok "an older app is brought up to date with its icon"
+else
+  bad "an older app was not brought up to date: $(cat "$OUT/refresh.txt")"
+fi
+SKY_LAUNCHCTL=/usr/bin/true /bin/bash "$SKY" launch > "$OUT/refresh2.txt" 2>&1 || true
+grep -q 'brought up to date' "$OUT/refresh2.txt" && bad "an app already up to date was made again" || ok "an app already up to date is left alone"
 # the app starts the launcher through the home folder, as it would on another Mac
 mkdir -p "$HOME/Games/skywalker"
 if [ ! -e "$HOME/Games/skywalker/skywalker.sh" ]; then
@@ -174,7 +187,10 @@ EOF
   # settings ("open" also passes its environment on to the app, so clear them)
   HOMEAPP="$HOME/Applications/Skywalker Saga.app"
   env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX SKYWALKER_NO_DOCK=1 /bin/bash "$HOME/Games/skywalker/skywalker.sh" app > "$OUT/homeapp.txt" 2>&1 || bad "making the app from ~/Games/skywalker failed: $(tail -n 3 "$OUT/homeapp.txt")"
-  grep -a -q 'Games/skywalker/skywalker.sh' "$HOMEAPP/Contents/MacOS/skywalker-launcher" && ok "the app looks for the launcher in ~/Games/skywalker" || bad "the app does not point at ~/Games/skywalker: $(grep -a 'L=' "$HOMEAPP/Contents/MacOS/skywalker-launcher")"
+  [ -x "$HOMEAPP/Contents/MacOS/applet" ] && ok "the app is the loading window itself (compiled with osacompile)" || bad "the app is not a compiled applet: $(ls "$HOMEAPP/Contents/MacOS")"
+  grep -q "^const LAUNCHER = '~/Games/skywalker/skywalker.sh';" "$HOMEAPP/Contents/Resources/loading-source.js" && ok "the app looks for the launcher in ~/Games/skywalker" || bad "the app does not point at ~/Games/skywalker: $(head -n 1 "$HOMEAPP/Contents/Resources/loading-source.js")"
+  codesign --verify "$HOMEAPP" 2>&1 && ok "the app's seal is valid" || bad "the app's seal is broken"
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$HOMEAPP/Contents/Info.plist" | grep -q 'local.skywalker-saga.launcher' && ok "it keeps the app's identity" || bad "the app lost its identity"
   # windows of a process: owner name and size (no permission needed for these)
   windows_of() {
     /usr/bin/osascript -l JavaScript -e 'ObjC.import("CoreGraphics"); ObjC.import("Foundation");
@@ -188,13 +204,15 @@ EOF
   env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$HOMEAPP" > "$OUT/open.txt" 2>&1; echo "  open: exit $? $(cat "$OUT/open.txt")"
   lpid=""
   for _ in $(seq 1 40); do
-    lpid="$(pgrep -f 'Resources/loading.js' | head -n 1)"
+    lpid="$(pgrep -f 'Skywalker Saga.app/Contents/MacOS/applet' | head -n 1)"
     if [ -n "$lpid" ] && windows_of "$lpid" | grep -q '[0-9]x[0-9]'; then break; fi
     sleep 0.25
   done
   t_win=$(perl -MTime::HiRes=time -e 'print time')
   if [ -n "$lpid" ] && windows_of "$lpid" | grep -q '[0-9]x[0-9]'; then
     ok "the loading window is up $(perl -e "printf '%.1f', $t_win - $t_open") s after the click: $(windows_of "$lpid")"
+    windows_of "$lpid" | grep -q '^Skywalker Saga ' && ok "it is shown as Skywalker Saga" || bad "it is shown as: $(windows_of "$lpid")"
+    perl -e "exit !($t_win - $t_open < 4)" && ok "within 4 s" || bad "the window took longer than 4 s"
   else
     bad "no loading window within 10 s (process: ${lpid:-none})"
   fi
@@ -222,7 +240,7 @@ EOF
   sed 's/^/  stages: /' "$HOME/Games/skywalker/logs/start-stages.txt" 2>/dev/null
   sed 's/^/  loading.log: /' "$HOME/Games/skywalker/logs/loading.log" 2>/dev/null | tail -n 10
   cat "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null | sed 's/^/  launcher.log: /'
-  pkill -f 'Resources/loading.js' 2>/dev/null || true
+  pkill -f 'Skywalker Saga.app/Contents/MacOS/applet' 2>/dev/null || true
   launchctl print "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null | grep -E 'state|last exit' | sed 's/^/  job: /'
   launchctl bootout "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null || true
   rm -f "$HOME/Games/skywalker/skywalker.sh"
