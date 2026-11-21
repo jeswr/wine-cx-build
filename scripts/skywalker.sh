@@ -60,7 +60,12 @@ SELF_URL="https://raw.githubusercontent.com/$REPO/main/scripts/skywalker.sh"
 STEAM_EXE='C:\Program Files (x86)\Steam\steam.exe'
 
 say() { echo "== $*"; }
-die() { echo "skywalker: $*" >&2; notify "$*"; exit 1; }
+die() {
+  echo "skywalker: $*" >&2
+  if [ -n "${UI_T0:-}" ]; then ui_status failed "$*"; fi
+  notify "$*"
+  exit 1
+}
 notify() {
   /usr/bin/osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Skywalker Saga"' \
     -e 'end run' "$1" >/dev/null 2>&1 || true
@@ -1104,24 +1109,22 @@ make_icns() {
   rm -rf "$tmp"
 }
 
-create_app() {
-  local launcher_path exe icon_key="" note
-  # The app finds the launcher through the home folder of whoever opens it,
-  # so it keeps working if the folder is copied to another Mac or user.
+# The app finds the launcher through the home folder of whoever opens it,
+# so it keeps working if the folder is copied to another Mac or user.
+app_launcher_path() {
   case "$HOME_DIR" in
-    "$HOME"/*) launcher_path="\$HOME${HOME_DIR#$HOME}/skywalker.sh" ;;
-    *) launcher_path="$HOME_DIR/skywalker.sh" ;;
+    "$HOME"/*) echo "\$HOME${HOME_DIR#$HOME}/skywalker.sh" ;;
+    *) echo "$HOME_DIR/skywalker.sh" ;;
   esac
-  rm -rf "$APP.new"
-  mkdir -p "$APP.new/Contents/MacOS" "$APP.new/Contents/Resources" "$LOGS"
-  exe="$(game_exe || true)"
-  if [ -n "$exe" ] && note="$(make_icns "$exe" "$APP.new/Contents/Resources/AppIcon.icns")"; then
-    icon_key="<key>CFBundleIconFile</key><string>AppIcon</string>"
-    say "App icon: the game's own ${note#icon: from }"
-  else
-    say "The game's icon could not be taken from its program (${note:-game not found}); the app gets the plain icon."
-  fi
-  cat > "$APP.new/Contents/Info.plist" <<EOF
+}
+
+# Writes the app's text files (not its icon) into the app folder $1.
+# $2 = where the app looks for the launcher
+app_files() {
+  local a="$1" icon_key=""
+  mkdir -p "$a/Contents/MacOS" "$a/Contents/Resources"
+  if [ -f "$a/Contents/Resources/AppIcon.icns" ]; then icon_key="<key>CFBundleIconFile</key><string>AppIcon</string>"; fi
+  cat > "$a/Contents/Info.plist.new" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -1131,30 +1134,282 @@ create_app() {
   <key>CFBundleIdentifier</key><string>local.skywalker-saga.launcher</string>
   <key>CFBundleExecutable</key><string>skywalker-launcher</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>2.0</string>
-  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleShortVersionString</key><string>3.0</string>
+  <key>CFBundleVersion</key><string>3</string>
   $icon_key
   <key>LSApplicationCategoryType</key><string>public.app-category.action-games</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
-  <key>LSUIElement</key><true/>
 </dict>
 </plist>
 EOF
-  cat > "$APP.new/Contents/MacOS/skywalker-launcher" <<EOF
+  cat > "$a/Contents/MacOS/skywalker-launcher.new" <<EOF
 #!/bin/bash
-# Starts the game and returns at once, so the icon does not sit bouncing.
+# Hands the start to the launcher, then shows the loading window until the
+# game's own window is up. Closing that window does not stop the start.
 L="\${SKYWALKER_HOME:+\$SKYWALKER_HOME/skywalker.sh}"
-L="\${L:-$launcher_path}"
+L="\${L:-$2}"
 if [ ! -f "\$L" ]; then
   /usr/bin/osascript -e 'display notification "The launcher is missing: ~/Games/skywalker/skywalker.sh" with title "Skywalker Saga"'
   exit 1
 fi
-mkdir -p "\$(dirname "\$L")/logs"
+D="\$(dirname "\$L")"
+R="\$(cd "\$(dirname "\$0")/../Resources" && pwd)"
+mkdir -p "\$D/logs"
+start="\$(date +%s)"
 # "launch" hands the start to macOS as a job of its own and returns: what an app
 # starts is ended with the app, and the game and Steam must outlive this script.
-exec /bin/bash "\$L" launch >> "\$(dirname "\$L")/logs/launcher.log" 2>&1
+/bin/bash "\$L" launch >> "\$D/logs/launcher.log" 2>&1
+if [ -f "\$R/loading.js" ] && [ -z "\${SKYWALKER_NO_WINDOW:-}" ]; then
+  exec /usr/bin/osascript -l JavaScript "\$R/loading.js" "\$D/logs" "\$start" "\$R/AppIcon.icns" >> "\$D/logs/loading.log" 2>&1
+fi
 EOF
-  chmod +x "$APP.new/Contents/MacOS/skywalker-launcher"
+  chmod +x "$a/Contents/MacOS/skywalker-launcher.new"
+  loading_js > "$a/Contents/Resources/loading.js.new"
+  # each file is swapped in whole: the app may be running its script right now
+  mv -f "$a/Contents/Info.plist.new" "$a/Contents/Info.plist"
+  mv -f "$a/Contents/MacOS/skywalker-launcher.new" "$a/Contents/MacOS/skywalker-launcher"
+  mv -f "$a/Contents/Resources/loading.js.new" "$a/Contents/Resources/loading.js"
+}
+
+# Brings an app made by an older launcher up to date (its text files only:
+# the icon and the Dock entry stay). Quiet; returns 0 when nothing was needed.
+refresh_app() {
+  local t
+  [ -d "$APP/Contents/MacOS" ] || return 0
+  t="$(mktemp -d "${TMPDIR:-/tmp}/skywalker-app.XXXXXX")" || return 0
+  mkdir -p "$t/Contents/Resources"
+  if [ -f "$APP/Contents/Resources/AppIcon.icns" ]; then : > "$t/Contents/Resources/AppIcon.icns"; fi
+  app_files "$t" "$(app_launcher_path)"
+  if ! /usr/bin/cmp -s "$t/Contents/MacOS/skywalker-launcher" "$APP/Contents/MacOS/skywalker-launcher" \
+    || ! /usr/bin/cmp -s "$t/Contents/Resources/loading.js" "$APP/Contents/Resources/loading.js" \
+    || ! /usr/bin/cmp -s "$t/Contents/Info.plist" "$APP/Contents/Info.plist"; then
+    app_files "$APP" "$(app_launcher_path)"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" > /dev/null 2>&1 || true
+    say "The app was brought up to date (loading window)."
+  fi
+  rm -rf "$t"
+}
+
+# The loading window (osascript -l JavaScript; see the comments at its top).
+loading_js() {
+  cat <<'EOF'
+// The window the app shows from the moment it is clicked until the game's own
+// window is up. It follows logs/start-status, which the launcher rewrites at
+// every stage of the start, and estimates the time left from earlier starts.
+// Run with: osascript -l JavaScript loading.js LOGSDIR APPSTART [ICON]
+// Closing the window only hides the progress: the start carries on.
+ObjC.import('Cocoa');
+ObjC.import('CoreGraphics');
+
+function readText(path) {
+  const s = $.NSString.stringWithContentsOfFileEncodingError(path, $.NSUTF8StringEncoding, null);
+  return s.isNil() ? null : ObjC.unwrap(s);
+}
+
+function readStatus(dir) {
+  const text = readText(dir + '/start-status');
+  if (text === null) return null;
+  const o = {};
+  text.split('\n').forEach(function (l) {
+    const i = l.indexOf('=');
+    if (i > 0) o[l.slice(0, i)] = l.slice(i + 1);
+  });
+  o.t0 = Number(o.t0) || 0;
+  o.now = Number(o.now) || 0;
+  o.expect = Number(o.expect) || 90;
+  o.state = o.state || '';
+  o.text = o.text || '';
+  return o;
+}
+
+// The middle of the last few numbers in a file of one number per line.
+function median(path, fallback) {
+  const text = readText(path);
+  if (text === null) return fallback;
+  const v = text.split('\n').map(Number).filter(function (n) { return n > 0; }).slice(-5);
+  if (!v.length) return fallback;
+  v.sort(function (a, b) { return a - b; });
+  return v[Math.floor(v.length / 2)];
+}
+
+function appendLine(path, line) {
+  const old = readText(path) || '';
+  $(old + line + '\n').writeToFileAtomicallyEncodingError(path, true, $.NSUTF8StringEncoding, null);
+}
+
+// Whether a Wine window covers most of the main screen: the game's own window.
+// (Steam's windows are smaller; owner names and sizes need no permission.)
+function gameWindowUp() {
+  const ref = $.CGWindowListCopyWindowInfo(1 | 16, 0);  // on screen only, no desktop
+  if (!ref) return false;
+  const list = ObjC.castRefToObject(ref);
+  const scr = $.NSScreen.mainScreen.frame.size;
+  const n = list.count;
+  for (let i = 0; i < n; i++) {
+    const w = list.objectAtIndex(i);
+    const owner = ObjC.unwrap(w.objectForKey('kCGWindowOwnerName')) || '';
+    const layer = ObjC.unwrap(w.objectForKey('kCGWindowLayer'));
+    const b = w.objectForKey('kCGWindowBounds');
+    if (b.isNil()) continue;
+    const bw = ObjC.unwrap(b.objectForKey('Width')), bh = ObjC.unwrap(b.objectForKey('Height'));
+    if (layer === 0 && /wine|\.exe|skywalker|lego/i.test(owner) && !/osascript/i.test(owner) &&
+        bw >= scr.width * 0.5 && bh >= scr.height * 0.5) return true;
+  }
+  return false;
+}
+
+function label(text, size, bold, x, y, w, h) {
+  const t = $.NSTextField.alloc.initWithFrame($.NSMakeRect(x, y, w, h));
+  t.stringValue = text;
+  t.bezeled = false;
+  t.drawsBackground = false;
+  t.editable = false;
+  t.selectable = false;
+  t.font = bold ? $.NSFont.boldSystemFontOfSize(size) : $.NSFont.systemFontOfSize(size);
+  t.lineBreakMode = 4;  // cut at the end with an ellipsis
+  return t;
+}
+
+function clock(secs) {
+  secs = Math.max(0, Math.round(secs));
+  const s = secs % 60;
+  return Math.floor(secs / 60) + ':' + (s < 10 ? '0' : '') + s;
+}
+
+function run(argv) {
+  const dir = argv[0];
+  const appStart = Number(argv[1]) || Date.now() / 1000;
+  const iconPath = argv[2] || '';
+  const app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy(0);  // a normal app: it has its Dock icon and comes to the front
+  let img = null;
+  if (iconPath) {
+    img = $.NSImage.alloc.initWithContentsOfFile(iconPath);
+    if (img.isNil()) img = null; else app.applicationIconImage = img;
+  }
+  app.finishLaunching;
+
+  const W = 470, H = 134;
+  const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
+    $.NSMakeRect(0, 0, W, H), 1 | 2 | 4, 2, false);  // titled, closable, can be minimised; buffered
+  win.title = 'Skywalker Saga';
+  win.releasedWhenClosed = false;
+  const view = win.contentView;
+  const left = img ? 118 : 24;
+  if (img) {
+    const iv = $.NSImageView.alloc.initWithFrame($.NSMakeRect(22, 27, 80, 80));
+    iv.image = img;
+    view.addSubview(iv);
+  }
+  const title = label('Starting LEGO Star Wars: The Skywalker Saga', 13, true, left, 94, W - left - 20, 20);
+  const stage = label('Getting ready', 12, false, left, 71, W - left - 20, 18);
+  const bar = $.NSProgressIndicator.alloc.initWithFrame($.NSMakeRect(left, 47, W - left - 20, 20));
+  bar.style = 0;  // a bar
+  bar.indeterminate = false;
+  bar.minValue = 0;
+  bar.maxValue = 100;
+  bar.doubleValue = 1;
+  const detail = label('', 11, false, left, 24, W - left - 20, 17);
+  detail.textColor = $.NSColor.secondaryLabelColor;
+  [title, stage, bar, detail].forEach(function (v) { view.addSubview(v); });
+  win.center;
+  win.makeKeyAndOrderFront(null);
+  app.activateIgnoringOtherApps(true);
+
+  const winExpect = median(dir + '/window-times.txt', 25);  // game process to game window
+  let runningSince = 0, endAt = 0, lastWindowCheck = 0, failed = false, shown = 1;
+  const limit = appStart + 20 * 60;
+  while (true) {
+    const ev = app.nextEventMatchingMaskUntilDateInModeDequeue(
+      4294967295, $.NSDate.dateWithTimeIntervalSinceNow(0.2), $.NSDefaultRunLoopMode, true);
+    if (ev && !ev.isNil()) app.sendEvent(ev);
+    if (!win.isVisible && !win.isMiniaturized) break;  // closed: the start carries on without it
+    const now = Date.now() / 1000;
+    if (endAt) { if (now >= endAt) break; continue; }
+    if (now > limit) break;
+    const st = readStatus(dir);
+    const fresh = st && (st.t0 >= appStart - 5 || st.state === 'starting' || st.state === 'running');
+    let target = shown;
+    if (!fresh) {
+      stage.stringValue = 'Getting ready';
+      detail.stringValue = clock(now - appStart);
+      if (now - appStart > 30) {
+        failed = true;
+        title.stringValue = 'The game did not start';
+        stage.stringValue = 'The launcher did not respond.';
+        detail.stringValue = 'Details: ~/Games/skywalker/logs/launcher.log';
+        bar.hidden = true;
+        endAt = now + 120;
+      }
+    } else if (st.state === 'starting') {
+      const elapsed = now - st.t0;
+      target = Math.max(2, Math.min(0.92, elapsed / st.expect) * 85);
+      stage.stringValue = st.text;
+      const remain = st.expect - elapsed;
+      let hint = remain > 7 ? 'About ' + (remain > 60 ? Math.round(remain / 60 * 2) / 2 + ' min' : Math.ceil(remain / 5) * 5 + ' seconds') + ' left'
+        : (elapsed > st.expect * 1.4 ? 'Taking longer than usual' : 'Almost there');
+      detail.stringValue = hint + '   ·   ' + clock(elapsed);
+      if (now - st.now > 90) {
+        failed = true;
+        title.stringValue = 'The game did not start';
+        stage.stringValue = 'The launcher stopped at: ' + st.text;
+        detail.stringValue = 'Details: ~/Games/skywalker/logs/launcher.log';
+        bar.hidden = true;
+        endAt = now + 120;
+      }
+    } else if (st.state === 'running') {
+      if (!runningSince) runningSince = now;
+      const t = now - runningSince;
+      target = 85 + 15 * Math.min(0.9, t / winExpect);
+      stage.stringValue = st.text || 'Loading the game';
+      detail.stringValue = (t < winExpect ? 'The game is loading' : 'Almost there') + '   ·   ' + clock(now - (st.t0 || appStart));
+      if (now - lastWindowCheck >= 1) {
+        lastWindowCheck = now;
+        let up = false;
+        try { up = gameWindowUp(); } catch (e) { up = false; }
+        if (up) appendLine(dir + '/window-times.txt', String(Math.max(1, Math.round(t))));
+        if (up || t > Math.max(60, winExpect * 3)) {
+          bar.doubleValue = 100;
+          stage.stringValue = 'Have fun!';
+          endAt = now + 0.8;
+        }
+      }
+    } else if (st.state === 'failed') {
+      failed = true;
+      title.stringValue = 'The game did not start';
+      stage.stringValue = st.text;
+      stage.toolTip = st.text;
+      detail.stringValue = 'Details: ~/Games/skywalker/logs/launcher.log';
+      bar.hidden = true;
+      endAt = now + 120;
+    } else {  // done: the game has already closed again
+      stage.stringValue = st.text || 'The game has closed.';
+      detail.stringValue = '';
+      endAt = now + 3;
+    }
+    if (!failed && target > shown) {
+      shown = Math.min(target, shown + 4);  // glide rather than jump
+      bar.doubleValue = shown;
+    }
+  }
+  win.orderOut(null);
+  return failed ? 'failed' : 'ok';
+}
+EOF
+}
+
+create_app() {
+  local launcher_path exe note
+  launcher_path="$(app_launcher_path)"
+  rm -rf "$APP.new"
+  mkdir -p "$APP.new/Contents/MacOS" "$APP.new/Contents/Resources" "$LOGS"
+  exe="$(game_exe || true)"
+  if [ -n "$exe" ] && note="$(make_icns "$exe" "$APP.new/Contents/Resources/AppIcon.icns")"; then
+    say "App icon: the game's own ${note#icon: from }"
+  else
+    say "The game's icon could not be taken from its program (${note:-game not found}); the app gets the plain icon."
+  fi
+  app_files "$APP.new" "$launcher_path"
   # swap in the new app in one step, so a Dock icon pointing at it stays valid
   rm -rf "$APP.old"
   if [ -d "$APP" ]; then mv "$APP" "$APP.old"; fi
@@ -1809,21 +2064,91 @@ steam_updated_since() {
 }
 
 # $1 = log file for Wine's output
+# ---------------------------------------------------------------- start progress
+
+# What the app's loading window shows: logs/start-status, rewritten (whole, in
+# one step) at every stage of a start and every second while Steam starts.
+#   t0= start (epoch seconds)  now= time of writing  state= starting|running|done|failed
+#   expect= seconds a start like this took lately  text= what is happening
+# Each new text is also noted in logs/start-stages.txt with its second, for "timeline".
+# $1 = state, $2 = text
+ui_status() {
+  local now
+  [ -n "${UI_T0:-}" ] || return 0
+  now="$(date +%s)"
+  printf 't0=%s\nnow=%s\nstate=%s\nexpect=%s\ntext=%s\n' "$UI_T0" "$now" "$1" "${UI_EXPECT:-90}" "$2" \
+    > "$LOGS/start-status.new" 2>/dev/null && mv -f "$LOGS/start-status.new" "$LOGS/start-status"
+  if [ "$1/$2" != "${UI_LAST:-}" ]; then
+    printf '%s\t%s\t%s\n' "$((now - UI_T0))" "$1" "$2" >> "$LOGS/start-stages.txt"
+    UI_LAST="$1/$2"
+  fi
+}
+
+# Seconds until the game was running in the last few starts of the same kind
+# (the middle one of the last five, so that one Steam update does not count).
+# $1 = cold (Steam starts too) or warm (Steam is open)
+expected_start() {
+  local d=90
+  [ "$1" = warm ] && d=15
+  [ -f "$LOGS/startup.tsv" ] || { echo "$d"; return 0; }
+  /usr/bin/awk -F'\t' -v w="$1" -v d="$d" '
+    (($3 == "open") == (w == "warm")) && $5 ~ /^[0-9]+$/ && $5 > 0 { v[n++] = $5 }
+    END {
+      if (!n) { print d; exit }
+      s = (n > 5) ? n - 5 : 0; m = 0
+      for (i = s; i < n; i++) a[m++] = v[i]
+      for (i = 1; i < m; i++) { x = a[i]; for (j = i - 1; j >= 0 && a[j] > x; j--) a[j + 1] = a[j]; a[j + 1] = x }
+      print a[int(m / 2)]
+    }' "$LOGS/startup.tsv"
+}
+
+# What Steam is doing for the game since the time given ("2026-11-21 15:42:17"),
+# from the end of its console log: "ready" once it has started up, then the
+# name of each step of the game's launch (SynchronizingCloud, CreatingProcess...).
+steam_stage() {
+  local f
+  f="$(steam_dir)/logs/console_log.txt"
+  [ -f "$f" ] || return 1
+  tail -c 8000 "$f" 2>/dev/null | /usr/bin/awk -v s="[$1]" '
+    substr($0, 1, 1) == "[" && substr($0, 1, 21) >= s {
+      if ($0 ~ /System startup time/) t = "ready"
+      if (match($0, /LaunchApp changed task to [A-Za-z]+/)) t = substr($0, RSTART + 26, RLENGTH - 26)
+    }
+    END { if (t == "") exit 1; print t }'
+}
+
+# $1 = what steam_stage printed
+steam_stage_words() {
+  case "$1" in
+    ready) echo "Steam is ready and is starting the game" ;;
+    SynchronizingCloud) echo "Steam is syncing your saves with Steam Cloud" ;;
+    CreatingProcess | WaitingGameWindow | Completed) echo "Steam is starting the game" ;;
+    *) echo "Steam is getting the game ready" ;;
+  esac
+}
+
 play() {
-  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game="" gargs
+  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game="" gargs stage words
+  mkdir -p "$LOGS"
+  t0="$(date +%s)"
+  UI_T0="$t0"   # from here on, the loading window hears of every stage and of a failure
+  UI_EXPECT="$(expected_start cold)"
   need_wine
   other_wine_running && die "CrossOver or another Wine is running. Quit it first."
   if game_running; then
+    ui_status running "The game is already running"
     say "The game is already running."
     return 0
   fi
-  mkdir -p "$LOGS"
-  t0="$(date +%s)"
+  : > "$LOGS/start-stages.txt"
   date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
   rm -f "$IDLE"
+  ui_status starting "Backing up your saves"
   backup_saves
+  ui_status starting "Fitting the game to your screen"
   display_prepare
   wine_env
+  if our_wineserver_running && steam_running; then UI_EXPECT="$(expected_start warm)"; fi
   if our_wineserver_running; then
     if steam_running; then
       if [ "$(cat "$SESSION" 2>/dev/null)" = "$(session_sig)" ]; then
@@ -1837,11 +2162,13 @@ play() {
       shutdown_wine
     fi
   fi
+  ui_status starting "Getting the game's files ready"
   prepare_prefix
   gargs="$(game_args)"
   note_game_args "$gargs"
   cd "$HOME" || true
   if [ "$warm" = 1 ]; then
+    ui_status starting "Steam is open: starting the game"
     say "Steam is still open, so the game starts straight away ($(settings_line))"
     # shellcheck disable=SC2086
     run_wine "$STEAM_EXE" -applaunch "$APPID" $gargs >> "$log" 2>&1 &
@@ -1858,11 +2185,19 @@ play() {
       say "The open Steam did not start the game, so Steam is started afresh."
       shutdown_wine
       warm=0
+      UI_EXPECT="$(expected_start cold)"
     fi
   fi
   if [ "$warm" != 1 ]; then
     say "Starting Steam and the game with $(current_tag) ($(settings_line))"
-    if bottle_update_due; then note_bottle_update; else notify "Starting the game. This can take a minute." & fi
+    ui_status starting "Starting Wine, the layer that runs Windows programs"
+    if bottle_update_due; then
+      UI_EXPECT=$((UI_EXPECT + 60))
+      ui_status starting "Updating the Windows layer for this build (once)"
+      note_bottle_update
+    elif [ -z "${SKYWALKER_FROM_APP:-}" ]; then
+      notify "Starting the game. This can take a minute." &
+    fi
     session_sig > "$SESSION"
     start_watchdog "$log"
     # shellcheck disable=SC2086,SC2046
@@ -1877,7 +2212,20 @@ play() {
       if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
       if [ "$i" = 40 ] && steam_updated_since "$(cat "$LOGS/last-start")"; then
         say "Steam is downloading an update of itself first. This start takes a few minutes longer."
+        UI_EXPECT=$((UI_EXPECT + 180))
+        words="Steam is updating itself first (a few minutes longer)"
+      elif [ "${words:-}" != "Steam is updating itself first (a few minutes longer)" ]; then
+        if stage="$(steam_stage "$(cat "$LOGS/last-start")")"; then
+          words="$(steam_stage_words "$stage")"
+        elif [ -n "$t_helper" ]; then
+          words="Steam is starting up and signing in"
+        elif [ -n "$t_steam" ]; then
+          words="Starting Steam"
+        else
+          words="Starting Wine, the layer that runs Windows programs"
+        fi
       fi
+      ui_status starting "$words"
       if [ "$i" -gt 60 ] && ! our_wineserver_running; then break; fi
     done
   fi
@@ -1885,16 +2233,19 @@ play() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(cat "$LOGS/last-start")" "$(current_tag)" "${t_steam:--}" "${t_helper:--}" "${t_game:--}" "$STEAM_ARGS $(steam_gpu_opt $STEAM_ARGS)" >> "$LOGS/startup.tsv"
   if [ "$started" != 1 ]; then
     if our_wineserver_running; then
+      ui_status failed "Steam is open but the game has not started. Sign in or press Play in Steam."
       notify "Steam is open but the game has not started. Sign in or press Play in Steam."
       echo "The game did not start within 10 minutes. Steam is left running; see $log"
       echo "Run 'bash $HOME_DIR/skywalker.sh steam' to open Steam's window, or '... stop' to close it."
     else
+      ui_status failed "Steam did not start."
       notify "Steam did not start. See the log in ~/Games/skywalker/logs."
       echo "Steam did not stay running. See $log"
     fi
     return 1
   fi
 
+  ui_status running "The game is loading"
   note_game_cmdline
   if [ "$warm" = 1 ]; then
     say "The game is running. It started ${t_game}s after the launcher."
@@ -1903,6 +2254,7 @@ play() {
     if steam_updated_since "$(cat "$LOGS/last-start")"; then say "Steam updated itself during this start, which is why it took longer than usual."; fi
   fi
   watch_game "$log"
+  ui_status done "The game has closed."
   say "The game has exited."
   keep="$(keep_seconds)"
   if [ "$keep" -gt 0 ] && steam_running; then
@@ -2060,6 +2412,7 @@ cmd_launch() {
   local dom plist="$HOME_DIR/run-job.plist" me
   load_conf
   mkdir -p "$LOGS"
+  refresh_app || true
   me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
   if [ ! -x "$LAUNCHCTL" ]; then exec /bin/bash "$me" run; fi
   dom="gui/$(id -u)"
@@ -2083,6 +2436,7 @@ cmd_launch() {
   <dict>
     <key>SKYWALKER_HOME</key><string>$(xml_text "$HOME_DIR")</string>
     <key>SKYWALKER_APP</key><string>$(xml_text "$APP")</string>
+    <key>SKYWALKER_FROM_APP</key><string>1</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>ProcessType</key><string>Interactive</string>
@@ -2164,6 +2518,10 @@ cmd_timeline() {
     tail -n 1 "$LOGS/startup.tsv" | /usr/bin/awk -F'\t' '{
       printf "Seconds until: Steam running %s, Steam browser part running %s, game running %s\n", $3, $4, $5
       printf "Build: %s   Steam options: %s\n", $2, $6 }'
+  fi
+  if [ -s "$LOGS/start-stages.txt" ]; then
+    echo "The launcher's stages (second: what the loading window said):"
+    /usr/bin/awk -F'\t' '{ printf "  %4s  %s\n", $1, $3 }' "$LOGS/start-stages.txt"
   fi
   if steam_updated_since "$since"; then echo "Steam downloaded and installed an update of itself during this start; that is extra time a normal start does not have."; fi
   if [ -f "$LOGS/game-starts.tsv" ]; then

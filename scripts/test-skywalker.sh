@@ -56,6 +56,20 @@ grep -q '"$L" launch' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail
 grep -q 'L="${L:-$HOME/Games/skywalker/skywalker.sh}"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "app does not find the launcher through the home folder"
 bash -n "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app's script is broken"
 if command -v plutil >/dev/null 2>&1; then plutil -lint "$SKYWALKER_APP/Contents/Info.plist"; fi
+[ -s "$SKYWALKER_APP/Contents/Resources/loading.js" ] || fail "the app has no loading window"
+grep -q 'function run(argv)' "$SKYWALKER_APP/Contents/Resources/loading.js" || fail "the loading window script is cut short"
+grep -q 'loading.js" "$D/logs" "$start"' "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher" || fail "the app does not show the loading window"
+if grep -q LSUIElement "$SKYWALKER_APP/Contents/Info.plist"; then fail "the app hides from the Dock, so its loading window would have no icon"; fi
+if command -v node >/dev/null 2>&1; then node --check "$SKYWALKER_APP/Contents/Resources/loading.js" || fail "the loading window script does not parse"; fi
+# an app made by an older launcher is brought up to date by "launch"
+printf '#!/bin/bash\nexec /bin/bash "$L" launch\n' > "$SKYWALKER_APP/Contents/MacOS/skywalker-launcher"
+rm -f "$SKYWALKER_APP/Contents/Resources/loading.js"
+mkdir -p "$T/fakebin"; printf '#!/bin/bash\necho "$@" >> "%s/lc.txt"\n' "$T" > "$T/fakebin/launchctl"; chmod +x "$T/fakebin/launchctl"
+SKY_LAUNCHCTL="$T/fakebin/launchctl" bash "$S" launch > "$T/refresh.txt" 2>&1 || true
+grep -q 'brought up to date' "$T/refresh.txt" || fail "launch did not bring an old app up to date: $(cat "$T/refresh.txt")"
+[ -s "$SKYWALKER_APP/Contents/Resources/loading.js" ] || fail "the old app did not get its loading window"
+SKY_LAUNCHCTL="$T/fakebin/launchctl" bash "$S" launch > "$T/refresh2.txt" 2>&1 || true
+if grep -q 'brought up to date' "$T/refresh2.txt"; then fail "an app already up to date was rewritten"; fi
 
 echo "-- game detection"
 bash "$S" doctor | tee "$T/doctor.txt"
@@ -378,6 +392,15 @@ SKY_KEEP_STEAM_MINUTES=0 SKY_STEAM_ARGS="-silent -testflag" bash "$S" run | tee 
 grep -q 'The game is running. It started [0-9]*s after the launcher' "$T/run.txt" || fail "run did not report the start-up time"
 grep -q 'The game has exited' "$T/run.txt" || fail "run did not notice the game ending"
 [ "$(wc -l < "$SKYWALKER_HOME/logs/startup.tsv" | tr -d ' ')" = 1 ] || fail "start-up time was not recorded"
+# what the loading window followed
+ST="$SKYWALKER_HOME/logs/start-stages.txt"
+cat "$ST"
+for want in 'Backing up your saves' 'Fitting the game to your screen' 'Starting Wine' 'The game is loading' 'The game has closed.'; do
+  grep -q "$want" "$ST" || fail "the loading window was not told: $want"
+done
+grep -q '^state=done$' "$SKYWALKER_HOME/logs/start-status" || fail "the last start is not marked as over"
+grep -q "^t0=$(date -d "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s 2>/dev/null || date -j -f '%Y-%m-%d %H:%M:%S' "$(cat "$SKYWALKER_HOME/logs/last-start")" +%s)$" "$SKYWALKER_HOME/logs/start-status" || fail "the status does not carry the start time"
+grep -q '^expect=90$' "$SKYWALKER_HOME/logs/start-status" || fail "a first start does not expect the usual 90 s: $(grep expect "$SKYWALKER_HOME/logs/start-status")"
 if steam_alive; then fail "Steam was left open although KEEP_STEAM_MINUTES is 0"; fi
 since="$(cat "$SKYWALKER_HOME/logs/last-start")"
 mkdir -p "$STEAM/logs"
@@ -394,6 +417,29 @@ grep -q 'Steam options: -silent -testflag -cef-disable-gpu' "$T/timeline.txt" ||
 grep -q 'bootstrap_log: Verification complete' "$T/timeline.txt" || fail "timeline misses Steam's starter"
 grep -q 'webhelper: Applying workarounds due to GPU process restarts' "$T/timeline.txt" || fail "timeline misses the graphics process restarts"
 grep -q 'content_log: AppID 920210 state changed' "$T/timeline.txt" || fail "timeline misses the game's lines"
+grep -q "The launcher's stages" "$T/timeline.txt" || fail "timeline misses the launcher's own stages"
+# the estimate is the middle of the last five cold starts, ignoring warm ones and failures
+cp "$SKYWALKER_HOME/logs/startup.tsv" "$T/startup.keep"
+printf 'x\tb\t2\t3\t%s\to\n' 207 55 118 26 104 91 >> "$SKYWALKER_HOME/logs/startup.tsv"
+printf 'x\tb\topen\topen\t%s\to\n' 4 6 5 >> "$SKYWALKER_HOME/logs/startup.tsv"
+printf 'x\tb\topen\topen\t-\to\n' >> "$SKYWALKER_HOME/logs/startup.tsv"
+# Steam saying what it does for the game
+{
+  echo "[$since] System startup time: 55.37 seconds"
+  echo "[$since] GameAction [AppID 920210, ActionID 1] : LaunchApp changed task to SynchronizingCloud with \"\""
+} > "$STEAM/logs/console_log.txt"
+cat > "$T/probe.sh" <<PROBE
+source <(sed -n '/^# ---------------------------------------------------------------- start progress/,/^play() {/p' "$S" | sed '\$d')
+LOGS="$SKYWALKER_HOME/logs"
+steam_dir() { echo "$STEAM"; }
+echo "cold=\$(expected_start cold) warm=\$(expected_start warm)"
+st="\$(steam_stage "$since")"; echo "stage=\$st words=\$(steam_stage_words "\$st")"
+PROBE
+bash "$T/probe.sh" | tee "$T/probe.txt"
+grep -q 'cold=91 warm=5' "$T/probe.txt" || fail "the start estimate is off"
+grep -q 'stage=SynchronizingCloud words=Steam is syncing your saves with Steam Cloud' "$T/probe.txt" || fail "Steam's step was not read from its log"
+cp "$T/startup.keep" "$SKYWALKER_HOME/logs/startup.tsv"
+rm -f "$STEAM/logs/console_log.txt"
 if grep -q 'long ago\|1 of 2 KB' "$T/timeline.txt"; then fail "timeline shows lines it should leave out"; fi
 
 echo "-- Steam stays open between games"

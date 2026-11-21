@@ -156,23 +156,73 @@ screencapture -x "$OUT/dock.png" || true
 # the app starts the launcher through the home folder, as it would on another Mac
 mkdir -p "$HOME/Games/skywalker"
 if [ ! -e "$HOME/Games/skywalker/skywalker.sh" ]; then
-  # the real launcher, with "run" standing in: it notes that it ran and, like the
-  # real one, leaves something running (Steam) after it returns
-  sed "s|^  run) cmd_run ;;|  run) echo run > '$OUT/app-ran.txt'; ( sleep 8; echo alive > '$OUT/app-child.txt' ) \\& ;;|" "$SKY" > "$HOME/Games/skywalker/skywalker.sh"
-  grep -q 'app-ran' "$HOME/Games/skywalker/skywalker.sh" || bad "the stand-in run was not put in"
+  # the real launcher, with "run" standing in: it goes through the stages of a
+  # start as the real one tells them to the loading window, and, like the real
+  # one, leaves something running (Steam) after it returns
+  cat > "$OUT/standin-run.sh" <<EOF
+load_conf; mkdir -p "\$LOGS"; UI_T0=\$(date +%s); UI_EXPECT=14
+echo run > '$OUT/app-ran.txt'
+ui_status starting "Starting Steam"; sleep 4
+ui_status starting "Steam is syncing your saves with Steam Cloud"; sleep 4
+ui_status running "The game is loading"
+( sleep 8; echo alive > '$OUT/app-child.txt' ) &
+EOF
+  sed "s|^  run) cmd_run ;;|  run) source '$OUT/standin-run.sh' ;;|" "$SKY" > "$HOME/Games/skywalker/skywalker.sh"
+  grep -q 'standin-run' "$HOME/Games/skywalker/skywalker.sh" || bad "the stand-in run was not put in"
   # The app made above points at this runner's launcher folder; make the app as
   # it is made on the Mac, from a launcher in ~/Games/skywalker with no test
   # settings ("open" also passes its environment on to the app, so clear them)
   HOMEAPP="$HOME/Applications/Skywalker Saga.app"
   env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX SKYWALKER_NO_DOCK=1 /bin/bash "$HOME/Games/skywalker/skywalker.sh" app > "$OUT/homeapp.txt" 2>&1 || bad "making the app from ~/Games/skywalker failed: $(tail -n 3 "$OUT/homeapp.txt")"
   grep -a -q 'Games/skywalker/skywalker.sh' "$HOMEAPP/Contents/MacOS/skywalker-launcher" && ok "the app looks for the launcher in ~/Games/skywalker" || bad "the app does not point at ~/Games/skywalker: $(grep -a 'L=' "$HOMEAPP/Contents/MacOS/skywalker-launcher")"
+  # windows of a process: owner name and size (no permission needed for these)
+  windows_of() {
+    /usr/bin/osascript -l JavaScript -e 'ObjC.import("CoreGraphics"); ObjC.import("Foundation");
+      function run(a) { const pid = Number(a[0]); const l = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1 | 16, 0)); const out = [];
+        for (let i = 0; i < l.count; i++) { const w = l.objectAtIndex(i); const p = ObjC.unwrap(w.objectForKey("kCGWindowOwnerPID"));
+          if (pid && p !== pid) continue; const b = w.objectForKey("kCGWindowBounds");
+          out.push(ObjC.unwrap(w.objectForKey("kCGWindowOwnerName")) + " " + ObjC.unwrap(b.objectForKey("Width")) + "x" + ObjC.unwrap(b.objectForKey("Height")) + " layer " + ObjC.unwrap(w.objectForKey("kCGWindowLayer"))); }
+        return out.join("; "); }' "$1" 2>&1
+  }
+  t_open=$(perl -MTime::HiRes=time -e 'print time')
   env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$HOMEAPP" > "$OUT/open.txt" 2>&1; echo "  open: exit $? $(cat "$OUT/open.txt")"
+  lpid=""
+  for i in $(seq 1 40); do
+    lpid="$(pgrep -f 'Resources/loading.js' | head -n 1)"
+    if [ -n "$lpid" ] && windows_of "$lpid" | grep -q '[0-9]x[0-9]'; then break; fi
+    sleep 0.25
+  done
+  t_win=$(perl -MTime::HiRes=time -e 'print time')
+  if [ -n "$lpid" ] && windows_of "$lpid" | grep -q '[0-9]x[0-9]'; then
+    ok "the loading window is up $(perl -e "printf '%.1f', $t_win - $t_open") s after the click: $(windows_of "$lpid")"
+  else
+    bad "no loading window within 10 s (process: ${lpid:-none})"
+  fi
+  sleep 2
+  screencapture -x "$OUT/loading-1.png" || true
   wait_for 20 test -s "$OUT/app-ran.txt" && ok "opening the app runs: skywalker.sh $(cat "$OUT/app-ran.txt")" || bad "opening the app did not run the launcher"
   wait_for 20 test -s "$OUT/app-child.txt" && ok "what the launcher leaves running outlives the app" || bad "macOS ended what the launcher left running"
+  if wait_for 20 grep -q '^state=running' "$HOME/Games/skywalker/logs/start-status"; then
+    sleep 1
+    screencapture -x "$OUT/loading-2.png" || true
+    [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null && ok "the window waits for the game's own window" || bad "the loading window closed before the game's window was up"
+    # the game's window: the stand-in game fills the screen
+    WINEDEBUG=-all /bin/bash "$SKY" wine "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Fake Game\\FAKEGAME_DX11.exe" --test-window 60 > "$OUT/game2.txt" 2>&1 &
+    if wait_for 90 sh -c "! kill -0 $lpid 2>/dev/null"; then
+      ok "the loading window closed once the game's window was up"
+      [ -s "$HOME/Games/skywalker/logs/window-times.txt" ] && ok "it saw the game's window ($(tail -n 1 "$HOME/Games/skywalker/logs/window-times.txt") s after the game started)" || bad "it closed on its time limit, not on the game's window"
+    else
+      bad "the loading window stayed after the game's window was up"
+    fi
+    windows_of 0 | tr ';' '\n' | grep -v ' layer [1-9]' | sed 's/^ */  window: /' | head -n 12
+    /bin/bash "$SKY" stop > /dev/null 2>&1 || true
+  else
+    bad "the stand-in start never reached the game stage: $(cat "$HOME/Games/skywalker/logs/start-status" 2>/dev/null)"
+  fi
+  sed 's/^/  stages: /' "$HOME/Games/skywalker/logs/start-stages.txt" 2>/dev/null
+  sed 's/^/  loading.log: /' "$HOME/Games/skywalker/logs/loading.log" 2>/dev/null | tail -n 10
   cat "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null | sed 's/^/  launcher.log: /'
-  log show --last 2m --style compact --predicate 'eventMessage CONTAINS[c] "skywalker"' 2>/dev/null | tail -n 25 | sed 's/^/  log: /'
-  env -u SKYWALKER_HOME -u SKYWALKER_APP -u SKY_PREFIX open "$HOMEAPP"; sleep 3
-  grep -q 'already starting or running' "$HOME/Games/skywalker/logs/launcher.log" 2>/dev/null && echo "  (a second click while it ran was ignored)"
+  pkill -f 'Resources/loading.js' 2>/dev/null || true
   launchctl print "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null | grep -E 'state|last exit' | sed 's/^/  job: /'
   launchctl bootout "gui/$(id -u)/io.github.jeswr.skywalker.run" 2>/dev/null || true
   rm -f "$HOME/Games/skywalker/skywalker.sh"
