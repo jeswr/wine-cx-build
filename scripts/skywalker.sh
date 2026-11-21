@@ -2373,7 +2373,7 @@ steam_stage_words() {
 }
 
 play() {
-  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game="" gargs stage words
+  local log="$1" i started=0 warm=0 keep t0 t_steam="" t_helper="" t_game="" gargs stage words woke=0 wait_s
   mkdir -p "$LOGS"
   t0="$(date +%s)"
   UI_T0="$t0"   # from here on, the loading window hears of every stage and of a failure
@@ -2393,9 +2393,11 @@ play() {
   : > "$LOGS/start-stages.txt"
   date '+%Y-%m-%d %H:%M:%S' > "$LOGS/last-start"
   rm -f "$IDLE"
+  woke=0
   if wine_paused; then
     ui_status starting "Waking Steam"
     resume_wine
+    woke=1
     sleep 1
   fi
   ui_status starting "Backing up your saves"
@@ -2428,11 +2430,15 @@ play() {
     # shellcheck disable=SC2086
     run_wine "$STEAM_EXE" -applaunch "$APPID" $gargs >> "$log" 2>&1 &
     # An open Steam starts the game within seconds. If it does not, it is not
-    # in a state to do so: start again from nothing.
-    for i in $(seq 1 "$WARM_WAIT"); do
+    # in a state to do so: start again from nothing. A Steam just woken from
+    # its pause first reconnects to Steam's servers, so it gets longer.
+    wait_s="$WARM_WAIT"
+    if [ "$woke" = 1 ] && [ "$wait_s" -lt 90 ]; then wait_s=90; fi
+    for i in $(seq 1 "$wait_s"); do
       sleep 1
       if game_running; then started=1; t_game=$(( $(date +%s) - t0 )); break; fi
       steam_running || break
+      if [ "$woke" = 1 ] && [ "$i" = 8 ]; then ui_status starting "Steam is reconnecting after its pause"; fi
     done
     if [ "$started" = 1 ]; then
       t_steam=open; t_helper=open
