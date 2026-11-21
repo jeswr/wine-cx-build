@@ -6,13 +6,14 @@
 # Pause app, a quit request arriving while paused (what a restart or log-out
 # sends), and "stop" on a paused game, which must not hang.
 #
-# Usage: test-pause.sh PAUSEGAME.EXE [HOLD_SECONDS] [SKYKEY.EXE]
+# Usage: test-pause.sh PAUSEGAME.EXE [HOLD_SECONDS] [SKYKEY.EXE] [SKYHOTKEY]
 #   (the launcher installed in ~/Games/skywalker and its bottle made, as on the Mac)
 # Every wait is bounded; nothing here can loop.
 set -uo pipefail
 GAME_SRC="$1"
 HOLD="${2:-120}"
 SKYKEY_SRC="${3:-}"
+SKYHOTKEY_SRC="${4:-}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SKY="$HOME/Games/skywalker/skywalker.sh"
 PREFIX="$HOME/Games/skywalker-cx"
@@ -179,7 +180,9 @@ else
 fi
 
 echo "-- the hotkey (Ctrl-Option-P): opens the game's menu (Esc), then pauses; again: resumes"
-if [ -n "$SKYKEY_SRC" ]; then mkdir -p "$HOME/Games/skywalker/tools"; cp "$SKYKEY_SRC" "$HOME/Games/skywalker/tools/skykey.exe"; fi
+mkdir -p "$HOME/Games/skywalker/tools"
+if [ -n "$SKYKEY_SRC" ]; then cp "$SKYKEY_SRC" "$HOME/Games/skywalker/tools/skykey.exe"; fi
+if [ -n "$SKYHOTKEY_SRC" ]; then cp "$SKYHOTKEY_SRC" "$HOME/Games/skywalker/tools/skyhotkey"; chmod +x "$HOME/Games/skywalker/tools/skyhotkey"; fi
 /bin/bash "$SKY" hotkey show | sed 's/^/  /'
 lines_before="$(wc -l < "$EV" | tr -d ' ')"
 with_deadline 60 /bin/bash "$SKY" toggle-pause hotkey > "$OUT/hotkey-toggle1.txt" 2>&1
@@ -187,7 +190,7 @@ tail -n +"$((lines_before + 1))" "$EV" | grep -q 'keydown 0x1b' && ok "the game 
 [ "$(not_frozen)" = 0 ] && ok "and it is paused" || bad "toggle-pause hotkey did not pause"
 with_deadline 60 /bin/bash "$SKY" toggle-pause hotkey > "$OUT/hotkey-toggle2.txt" 2>&1
 grep -q state=resumed "$OUT/hotkey-toggle2.txt" && ok "the second press resumes" || bad "the second press did not resume"
-SKY_HOTKEY_DEBUG=1 /bin/bash "$SKY" hotkey listen 240 > "$OUT/hotkey-listen.txt" 2>&1 &
+/bin/bash "$SKY" hotkey listen 240 > "$OUT/hotkey-listen.txt" 2>&1 &
 HK=$!
 if wait_for 20 grep -q '^registered' "$OUT/hotkey-listen.txt"; then
   sed 's/^/  listener: /' "$OUT/hotkey-listen.txt"
@@ -209,25 +212,13 @@ if /usr/bin/swiftc -O -o "$POSTKEY" "$HERE/postkey.swift" > "$OUT/postkey-build.
     f="$(hb frames)"
     if wait_for 20 grep -q '^done 2' "$OUT/hotkey-listen.txt" && wait_for 20 frames_over $((f + 30)); then ok "the second press brought it back"; else bad "the second press did not resume"; fi
   else
-    info "the pressed keys did not reach the listener (CI may not allow made-up key presses): $(tail -n 2 "$OUT/hotkey-listen.txt" | tr '\n' ' ')"
+    bad "the pressed keys did not reach the listener"
   fi
 else
   info "postkey did not build: $(tail -n 3 "$OUT/postkey-build.txt")"
 fi
 kill "$HK" 2>/dev/null
 /bin/bash "$SKY" resume > /dev/null 2>&1
-echo "  for information: the same with a compiled Carbon listener (Ctrl-Option-O)"
-if /usr/bin/swiftc -O -o "$OUT/hotkeyprobe" "$HERE/hotkeyprobe.swift" > "$OUT/probe-build.txt" 2>&1; then
-  "$OUT/hotkeyprobe" 31 6144 40 > "$OUT/probe.txt" 2>&1 &
-  wait_for 10 grep -q registered "$OUT/probe.txt"
-  "$POSTKEY" 31 ctrl,option > /dev/null 2>&1
-  sleep 3
-  grep -q 'probe pressed' "$OUT/probe.txt" || "$POSTKEY" 31 ctrl,option session > /dev/null 2>&1
-  sleep 3
-  sed 's/^/  probe: /' "$OUT/probe.txt"
-else
-  info "the probe did not build: $(tail -n 3 "$OUT/probe-build.txt")"
-fi
 sed 's/^/  listener: /' "$OUT/hotkey-listen.txt" | tail -n 6
 
 echo "-- a quit request while paused (what a restart or log-out sends)"

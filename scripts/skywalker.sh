@@ -3441,7 +3441,7 @@ dock_pin_pause() {
 }
 
 # ---- the pause hotkey
-# While the game runs, a small listener (hotkey.js) holds a system-wide
+# While the game runs, a small listener (tools/skyhotkey) holds a system-wide
 # keyboard shortcut, Ctrl-Option-P unless set otherwise with "hotkey". A press
 # pauses the game (after opening its own pause menu), the next press brings it
 # back. It uses the system's hotkey service, which needs no permission in
@@ -3449,6 +3449,7 @@ dock_pin_pause() {
 HOTKEY_FILE="$HOME_DIR/pause-hotkey"   # ctrl-option-p (default), another combination, or off
 HOTKEY_PID="$HOME_DIR/.hotkey.pid"
 SKYKEY="$HOME_DIR/tools/skykey.exe"   # presses a key for the game, inside Wine (scripts/skykey.c)
+SKYHOTKEY="$HOME_DIR/tools/skyhotkey"   # holds the hotkey (scripts/skyhotkey.swift)
 
 hotkey_spec() {
   local s
@@ -3459,103 +3460,54 @@ hotkey_spec() {
 # "ctrl-option-p" -> "Ctrl-Option-P"
 hotkey_words() { echo "$1" | awk -F- '{ for (i = 1; i <= NF; i++) { w = toupper(substr($i, 1, 1)) substr($i, 2); printf "%s%s", (i > 1 ? "-" : ""), w } print "" }'; }
 
-hotkey_valid() {
-  echo "$1" | /usr/bin/grep -Eqi '^((ctrl|control|option|opt|alt|cmd|command|shift)-)+([a-z0-9]|f[1-9]|f1[0-2])$'
-}
 
-hotkey_js() {
-  local f="$HOME_DIR/lib/hotkey.js"
-  mkdir -p "$HOME_DIR/lib"
-  cat > "$f.new" <<'EOF'
-// The launcher's pause hotkey. Run with: osascript -l JavaScript hotkey.js KEYS LAUNCHER MAXSECS
-// KEYS like ctrl-option-p. Holds that key combination system-wide through the
-// system's hotkey service (no permission needed) and, on each press, runs
-// "LAUNCHER toggle-pause hotkey". Prints "registered ..." once and "pressed N" per press.
-// Ends when its parent process has gone, or after MAXSECS.
-ObjC.import('Foundation');
-ObjC.import('AppKit');
-ObjC.bindFunction('getppid', ['int', []]);
-ObjC.bindFunction('malloc', ['void *', ['unsigned long']]);
-ObjC.bindFunction('GetApplicationEventTarget', ['void *', []]);
-// the hot key's id is a struct of two 32-bit numbers, passed by value: one 64-bit register on arm64 and x86-64
-ObjC.bindFunction('RegisterEventHotKey', ['int', ['unsigned int', 'unsigned int', 'unsigned long', 'void *', 'unsigned int', 'void *']]);
-
-function out(s) {
-  $.NSFileHandle.fileHandleWithStandardOutput.writeData($(s + '\n').dataUsingEncoding($.NSUTF8StringEncoding));
-}
-
-var KEYCODES = { a: 0, s: 1, d: 2, f: 3, h: 4, g: 5, z: 6, x: 7, c: 8, v: 9, b: 11, q: 12, w: 13, e: 14, r: 15,
-  y: 16, t: 17, '1': 18, '2': 19, '3': 20, '4': 21, '6': 22, '5': 23, '9': 25, '7': 26, '8': 28, '0': 29,
-  o: 31, u: 32, i: 34, p: 35, l: 37, j: 38, k: 40, n: 45, m: 46,
-  f1: 122, f2: 120, f3: 99, f4: 118, f5: 96, f6: 97, f7: 98, f8: 100, f9: 101, f10: 109, f11: 103, f12: 111 };
-var MODS = { cmd: 256, command: 256, shift: 512, option: 2048, opt: 2048, alt: 2048, ctrl: 4096, control: 4096 };
-
-function parse(spec) {
-  var parts = spec.toLowerCase().split('-'), mods = 0, key = parts.pop();
-  parts.forEach(function (p) { if (!(p in MODS)) throw 'unknown modifier ' + p; mods |= MODS[p]; });
-  if (!(key in KEYCODES)) throw 'unknown key ' + key;
-  return { code: KEYCODES[key], mods: mods };
-}
-
-var DEBUG = $.NSProcessInfo.processInfo.environment.objectForKey('SKY_HOTKEY_DEBUG').js === '1';
-
-function run(argv) {
-  var spec = argv[0], launcher = argv[1], maxsecs = parseInt(argv[2] || '43200', 10);
-  var k;
-  try { k = parse(spec); } catch (e) { out('error: ' + e); return; }
-  var app = $.NSApplication.sharedApplication;
-  app.setActivationPolicy(1);   // accessory: no Dock icon, no menu bar
-  app.finishLaunching;
-  var ref = $.malloc(8);
-  // signature 'SKYP' in the low half, id 1 in the high half
-  var id = 0x534B5950 + 4294967296 * 1;
-  var st = $.RegisterEventHotKey(k.code, k.mods, id, $.GetApplicationEventTarget(), 0, ref);
-  out('registered status=' + st + ' keys=' + spec + ' code=' + k.code + ' mods=' + k.mods);
-  if (st !== 0) return;
-  var start = Date.now(), presses = 0, quietUntil = 0;
-  while (true) {
-    // only the system's own events (type 14); a hot key press is subtype 6
-    var ev = app.nextEventMatchingMaskUntilDateInModeDequeue(1 << 14, $.NSDate.dateWithTimeIntervalSinceNow(1), $.NSDefaultRunLoopMode, true);
-    if (ev && !ev.isNil()) {
-      if (DEBUG) out('event type=' + ev.type + ' subtype=' + ev.subtype + ' data1=' + ev.data1);
-      if (ev.type === 14 && ev.subtype === 6) {
-        if (Date.now() >= quietUntil) {
-          presses++;
-          out('pressed ' + presses + ' at ' + new Date().toISOString());
-          var t = $.NSTask.alloc.init;
-          t.launchPath = '/bin/bash';
-          t.arguments = $([launcher, 'toggle-pause', 'hotkey']);
-          t.launch;
-          t.waitUntilExit;
-          out('done ' + presses + ' status=' + t.terminationStatus);
-          quietUntil = Date.now() + 1500;   // a press held or repeated during the change counts once
-        }
-      } else {
-        app.sendEvent(ev);
-      }
-    }
-    if ($.getppid() === 1) { out('parent gone'); return; }
-    if (Date.now() - start > maxsecs * 1000) { out('time up'); return; }
-  }
-}
-EOF
-  if /usr/bin/cmp -s "$f.new" "$f"; then rm -f "$f.new"; else mv "$f.new" "$f"; fi
-  echo "$f"
+# The system's numbers for the keys of a combination like ctrl-option-p: "KEYCODE MODS".
+hotkey_codes() {
+  local spec part key mods=0 code=""
+  spec="$(echo "$1" | tr 'A-Z' 'a-z')"
+  key="${spec##*-}"
+  for part in $(echo "${spec%-*}" | tr '-' ' '); do
+    case "$part" in
+      cmd|command) mods=$((mods | 256)) ;;
+      shift) mods=$((mods | 512)) ;;
+      option|opt|alt) mods=$((mods | 2048)) ;;
+      ctrl|control) mods=$((mods | 4096)) ;;
+      *) return 1 ;;
+    esac
+  done
+  case "$key" in
+    a) code=0 ;; s) code=1 ;; d) code=2 ;; f) code=3 ;; h) code=4 ;; g) code=5 ;; z) code=6 ;; x) code=7 ;;
+    c) code=8 ;; v) code=9 ;; b) code=11 ;; q) code=12 ;; w) code=13 ;; e) code=14 ;; r) code=15 ;; y) code=16 ;;
+    t) code=17 ;; 1) code=18 ;; 2) code=19 ;; 3) code=20 ;; 4) code=21 ;; 6) code=22 ;; 5) code=23 ;; 9) code=25 ;;
+    7) code=26 ;; 8) code=28 ;; 0) code=29 ;; o) code=31 ;; u) code=32 ;; i) code=34 ;; p) code=35 ;; l) code=37 ;;
+    j) code=38 ;; k) code=40 ;; n) code=45 ;; m) code=46 ;;
+    f1) code=122 ;; f2) code=120 ;; f3) code=99 ;; f4) code=118 ;; f5) code=96 ;; f6) code=97 ;; f7) code=98 ;;
+    f8) code=100 ;; f9) code=101 ;; f10) code=109 ;; f11) code=103 ;; f12) code=111 ;;
+    *) return 1 ;;
+  esac
+  [ "$mods" -gt 0 ] || return 1
+  echo "$code $mods"
 }
 
 # Starts the listener for as long as the game runs (play() stops it).
 hotkey_start() {
-  local spec js me
+  local spec codes me
   spec="$(hotkey_spec)"
   [ "$spec" = off ] && return 0
-  [ -x /usr/bin/osascript ] || return 0
-  hotkey_valid "$spec" || { say "The pause hotkey \"$spec\" is not a key combination I know; set another with: bash $HOME_DIR/skywalker.sh hotkey ctrl-option-p"; return 0; }
+  if ! codes="$(hotkey_codes "$spec")"; then
+    say "The pause hotkey \"$spec\" is not a key combination I know; set another with: bash $HOME_DIR/skywalker.sh hotkey ctrl-option-p"
+    return 0
+  fi
+  if [ ! -x "$SKYHOTKEY" ]; then
+    say "The hotkey helper ($SKYHOTKEY) is missing, so there is no pause hotkey this time. The Pause app still works."
+    return 0
+  fi
   hotkey_stop
-  js="$(hotkey_js)"
   me="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
   mkdir -p "$LOGS"
   echo "== $(date '+%Y-%m-%d %H:%M:%S') listening for $spec" >> "$LOGS/hotkey.log"
-  /usr/bin/osascript -l JavaScript "$js" "$spec" "$me" 43200 >> "$LOGS/hotkey.log" 2>&1 &
+  # shellcheck disable=SC2086
+  "$SKYHOTKEY" $codes "$me" 43200 >> "$LOGS/hotkey.log" 2>&1 &
   echo $! > "$HOTKEY_PID"
   say "Pause hotkey: $(hotkey_words "$spec") pauses the game and brings it back."
 }
@@ -3564,7 +3516,7 @@ hotkey_stop() {
   local pid
   pid="$(cat "$HOTKEY_PID" 2>/dev/null || true)"
   case "$pid" in ''|*[!0-9]*) ;; *)
-    if /bin/ps -p "$pid" -o command= 2>/dev/null | /usr/bin/grep -q 'hotkey\.js'; then kill "$pid" 2>/dev/null || true; fi ;;
+    if /bin/ps -p "$pid" -o command= 2>/dev/null | /usr/bin/grep -q 'skyhotkey'; then kill "$pid" 2>/dev/null || true; fi ;;
   esac
   rm -f "$HOTKEY_PID"
 }
@@ -3589,11 +3541,15 @@ cmd_hotkey() {
   case "$a" in
     show)
       echo "Pause hotkey: $(hotkey_words "$(hotkey_spec)") (works while the game runs; set another with: hotkey ctrl-option-p, or hotkey off)"
-      if [ -f "$SKYKEY" ]; then echo "Before pausing, it opens the game's menu with: ${PAUSE_MENU_KEY:-esc}"; else echo "The key helper is missing ($SKYKEY), so the game's menu is not opened first."; fi ;;
+      if [ -f "$SKYKEY" ]; then echo "Before pausing, it opens the game's menu with: ${PAUSE_MENU_KEY:-esc}"; else echo "The key helper is missing ($SKYKEY), so the game's menu is not opened first."; fi
+      [ -x "$SKYHOTKEY" ] || echo "The hotkey helper is missing ($SKYHOTKEY), so there is no hotkey yet." ;;
     off) echo off > "$HOTKEY_FILE"; hotkey_stop; say "No pause hotkey. The Pause app and the game's icon still work." ;;
-    listen) mkdir -p "$LOGS"; exec /usr/bin/osascript -l JavaScript "$(hotkey_js)" "$(hotkey_spec)" "$HOME_DIR/skywalker.sh" "${2:-43200}" ;;   # for tests
+    listen)   # for tests: the listener in front, for $2 seconds
+      [ -x "$SKYHOTKEY" ] || die "The hotkey helper is missing: $SKYHOTKEY"
+      # shellcheck disable=SC2046
+      exec "$SKYHOTKEY" $(hotkey_codes "$(hotkey_spec)") "$HOME_DIR/skywalker.sh" "${2:-43200}" ;;
     *)
-      hotkey_valid "$a" || die "Not a key combination I know: $a (for example ctrl-option-p, cmd-shift-f9)"
+      hotkey_codes "$a" > /dev/null || die "Not a key combination I know: $a (for example ctrl-option-p, cmd-shift-f9)"
       echo "$a" | tr 'A-Z' 'a-z' > "$HOTKEY_FILE"
       say "Pause hotkey: $(hotkey_words "$(hotkey_spec)"). It is used from the next start of the game." ;;
   esac

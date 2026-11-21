@@ -13,7 +13,7 @@ on:
       - 'scripts/test-pause.sh'
       - 'scripts/skykey.c'
       - 'scripts/postkey.swift'
-      - 'scripts/hotkeyprobe.swift'
+      - 'scripts/skyhotkey.swift'
   workflow_dispatch:
 
 permissions:
@@ -43,7 +43,8 @@ jobs:
           brew install mingw-w64 > /dev/null
           x86_64-w64-mingw32-gcc -O1 -Wall -mwindows -o pausegame.exe scripts/pausegame.c -ld3d11 -ldxgi -lwinmm -luuid -lgdi32
           x86_64-w64-mingw32-gcc -O1 -Wall -o skykey.exe scripts/skykey.c
-          ls -la pausegame.exe skykey.exe
+          swiftc -O -target arm64-apple-macos13 -o skyhotkey scripts/skyhotkey.swift
+          ls -la pausegame.exe skykey.exe skyhotkey; file skyhotkey; codesign -dv skyhotkey 2>&1 | head -3
 
       - name: Install the build with the launcher, as on the Mac, and make a bottle
         run: |
@@ -59,7 +60,7 @@ jobs:
 
       - name: Pause, hold, resume
         timeout-minutes: 30
-        run: /bin/bash scripts/test-pause.sh "$PWD/pausegame.exe" "${{ matrix.hold }}" "$PWD/skykey.exe"
+        run: /bin/bash scripts/test-pause.sh "$PWD/pausegame.exe" "${{ matrix.hold }}" "$PWD/skykey.exe" "$PWD/skyhotkey"
 
       - name: Upload the logs
         if: always()
@@ -69,5 +70,6 @@ jobs:
           path: |
             selftest-logs
             skykey.exe
+            skyhotkey
             ~/Games/skywalker/logs
           if-no-files-found: ignore
