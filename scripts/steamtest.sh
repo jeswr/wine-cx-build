@@ -11,6 +11,9 @@
 #           each of these starts up to Steam's sign-in screen and write timeline.txt,
 #           STEAMTEST_OUT=<folder for logs and screenshots> (default ./steam-logs),
 #           READY_TEST=1: check "ready on" (Steam paused once ready, woken on use) instead
+#           CEFWRAP=<path to cefwrap.exe>: rounds that start with +cef:<options> run Steam's
+#           browser program through it with those extra Chromium options (commas for spaces;
+#           +cef: alone adds none, for a fair comparison)
 # Written for the stock /bin/bash 3.2 on macOS.
 set -uo pipefail
 
@@ -128,6 +131,27 @@ stamp() {
   grep -a "$1" "$STEAM_DIR/logs/$2" 2>/dev/null | head -n 1 | sed -n 's/^\[[0-9-]* \([0-9:]*\)\].*/\1/p'
 }
 
+# Puts scripts/cefwrap.c in place of every steamwebhelper.exe (once; again if Steam
+# put its own file back) and sets the extra options it adds. $1 = options, or "-"
+# to put Steam's own program back.
+cef_wrap() {
+  local flags="$1" h d
+  for h in "$STEAM_DIR"/bin/cef/*/steamwebhelper.exe; do
+    [ -f "$h" ] || continue
+    d="$(dirname "$h")"
+    if [ "$flags" = - ]; then
+      if [ -f "$d/steamwebhelper_real.exe" ]; then mv -f "$d/steamwebhelper_real.exe" "$h"; fi
+      continue
+    fi
+    if ! cmp -s "$h" "$CEFWRAP"; then
+      mv -f "$h" "$d/steamwebhelper_real.exe"
+      cp "$CEFWRAP" "$h"
+    fi
+    printf '%s\n' "$flags" > "$d/steamwebhelper_flags.txt"
+    rm -f "$d/steamwebhelper_wrap.log"
+  done
+}
+
 # Times one start of Steam, from the launcher to the sign-in screen. $1 = round number, $2 = options.
 time_round() {
   local n="$1" args="$2" gpu=0 trace="$TRACE" t0 t=0 dir boot verify helper restart ready login id pid
@@ -135,6 +159,10 @@ time_round() {
   case "$args" in "+gpu"*) gpu=1; args="${args#+gpu}" ;; esac
   # a line that starts with +trace:<channels> sets Wine's debug channels for that start
   case "$args" in "+trace:"*) trace="${args#+trace:}"; trace="${trace%% *}"; args="${args#+trace:"$trace"}" ;; esac
+  # a line that starts with +cef:<options> runs Steam's browser program through cefwrap.exe
+  local cef=-
+  case "$args" in "+cef:"*) cef="${args#+cef:}"; cef="${cef%% *}"; args="${args#+cef:"$cef"}"; cef="$(echo "$cef" | tr ',' ' ')" ;; esac
+  if [ -n "${CEFWRAP:-}" ]; then cef_wrap "$cef"; fi
   dir="$OUT/round-$n"
   mkdir -p "$dir"
   rm -f "$STEAM_DIR"/logs/*.txt "$SKYWALKER_HOME"/logs/steam-*.log
@@ -168,10 +196,15 @@ time_round() {
   ready="$(stamp 'BrowserReady' steamui_html.txt)"
   login="$(stamp 'WaitingForCredentials - OK' steamui_login.txt)"
   {
-    echo "round $n: options [$args], graphics process allowed: $gpu, trace: $trace"
+    echo "round $n: options [$args], graphics process allowed: $gpu, trace: $trace, extra browser options: [${cef}]"
     echo "  seconds after the launcher was started: Steam's starter $(gap "$t0" "$boot"), its checks done $(gap "$t0" "$verify"), browser helper asked for $(gap "$t0" "$helper"), first page ready $(gap "$t0" "$ready"), helper restarted $(gap "$t0" "$restart"), sign-in screen $(gap "$t0" "$login")"
     echo "  graphics process starts: $(grep -a -c 'GPU process started' "$STEAM_DIR/logs/webhelper_gpu.txt" 2>/dev/null); sign-in window listed: $(grep -c 'Sign in to Steam' "$dir/windows.txt"); capture: $(wc -c < "$dir/sign-in.png" 2>/dev/null | tr -d ' ') bytes"
     echo "  helper launches: $(grep -a -c 'webhelper launched' "$STEAM_DIR/logs/webhelper.txt" 2>/dev/null); restarts of its graphics process noted: $(grep -a -c 'GPU process restarts' "$STEAM_DIR/logs/webhelper.txt" 2>/dev/null); Direct3D copies next to the helper: $(find "$STEAM_DIR/bin/cef/" -maxdepth 2 \( -name 'd3d1*.dll' -o -name 'dxgi.dll' \) -exec basename {} \; 2>/dev/null | tr '\n' ' ')"
+    echo "  processor seconds used by Steam's programs still running at the sign-in screen: $(tail -n 60 "$dir/cpu.log" 2>/dev/null | awk '/^==/ { s = 0; next } { split($3, a, ":"); s += a[1] * 60 + a[2] } END { printf "%.0f", s }')"
+    if [ "$cef" != - ]; then
+      cat "$STEAM_DIR"/bin/cef/*/steamwebhelper_wrap.log 2>/dev/null | sed 's/^/    wrapper: /' | cut -c1-260 | head -n 6
+      [ -n "$(cat "$STEAM_DIR"/bin/cef/*/steamwebhelper_wrap.log 2>/dev/null)" ] || echo "    wrapper: NOT USED (Steam replaced it or started another file)"
+    fi
     # with +loaddll in the trace: which Direct3D each program loaded, and from where
     cat "$SKYWALKER_HOME"/logs/steam-*.log 2>/dev/null | grep -a -i -E 'Loaded L"[^"]*(d3d11|dxgi|winemetal|wined3d)\.dll"' | sed -E 's/^[0-9.]*:?[0-9a-f]*:[0-9a-f]*://; s/ at [0-9A-Fa-fx]+//' | sort | uniq -c | sed 's/^/    loaded: /' | head -n 12
   } | tee -a "$OUT/timeline.txt"

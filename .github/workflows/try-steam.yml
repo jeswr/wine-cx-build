@@ -5,10 +5,12 @@ name: Try Steam on the runner
 # keeps screenshots and logs. Each row of the matrix is one set-up to compare.
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - '.github/workflows/try-steam.yml'
       - 'scripts/steamtest.sh'
+      - 'scripts/cefwrap.c'
 
 permissions:
   contents: read
@@ -22,17 +24,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # DXMT for everything, as D3DMetal is for everything on a real Mac:
-          # does Steam's browser part load its own copies of Wine's Direct3D,
-          # and does Steam still come up?
-          - name: dxmt-steam-own-d3d
-            runner: macos-15
-            graphics: dxmt
-            own: "1"
-          - name: split
+          # Steam's browser program with Chromium's headless option, against the
+          # same program with no extra option (through the same wrapper), in turns
+          - name: headless-macos-15
             runner: macos-15
             graphics: split
-            own: "1"
+            own: "0"
+          - name: headless-macos-latest
+            runner: macos-latest
+            graphics: split
+            own: "0"
     env:
       TAG: wine-cx-26.3.0-patched-7
       GRAPHICS: ${{ matrix.graphics }}
@@ -42,8 +43,12 @@ jobs:
       MINUTES: "2"
       # one start of Steam per line, timed up to the sign-in screen
       ROUNDS: |-
-
-        +trace:+pid,+loaddll,fixme-all
+        +cef:
+        +cef:--headless
+        +cef:
+        +cef:--headless
+        +cef:--headless=new
+        +cef:
     steps:
       - uses: actions/checkout@v4
 
@@ -55,8 +60,15 @@ jobs:
           export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
           /bin/bash scripts/skywalker.sh install "$TAG"
 
+      - name: Build the wrapper for Steam's browser program
+        run: |
+          brew install mingw-w64 > /dev/null
+          x86_64-w64-mingw32-gcc -O1 -Wall -municode -o "$RUNNER_TEMP/cefwrap.exe" scripts/cefwrap.c
+          ls -la "$RUNNER_TEMP/cefwrap.exe"
+
       - name: Install Steam, start it and watch the screen
         run: |
+          export CEFWRAP="$RUNNER_TEMP/cefwrap.exe"
           export SKYWALKER_HOME="$RUNNER_TEMP/sky" SKYWALKER_APP="$RUNNER_TEMP/Applications/Skywalker Saga.app"
           export SKY_PREFIX="$RUNNER_TEMP/sky-prefix"
           export STEAMTEST_OUT="$PWD/steam-logs"
