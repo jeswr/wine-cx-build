@@ -25,7 +25,10 @@ jobs:
       matrix:
         include:
           # Steam's browser program with Chromium's headless option, against the
-          # same program with no extra option (through the same wrapper), in turns
+          # same program with no extra option (through the same wrapper), in turns.
+          # Steam checks its programs' sizes on each start and downloads its own
+          # browser program again when the size differs (so the wrapper was never
+          # used): -noverifyfiles, Steam's own option, skips that check
           - name: headless-macos-15
             runner: macos-15
             graphics: split
@@ -43,12 +46,12 @@ jobs:
       MINUTES: "2"
       # one start of Steam per line, timed up to the sign-in screen
       ROUNDS: |-
-        +cef:
-        +cef:--headless
-        +cef:
-        +cef:--headless
-        +cef:--headless=new
-        +cef:
+        +cef: -noverifyfiles
+        +cef:--headless -noverifyfiles
+        +cef: -noverifyfiles
+        +cef:--headless -noverifyfiles
+        +cef:--headless=new -noverifyfiles
+        +cef: -noverifyfiles
     steps:
       - uses: actions/checkout@v4
 
